@@ -1,0 +1,11 @@
+Ignore local cache files
+
+nba_player_stats_cache.json
+pycache/
+*.pyc
+
+Ignore system files
+
+.DS_Store
+.env
+venv/
