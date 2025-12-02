@@ -232,6 +232,40 @@ def get_player_score_for_date(player_id, target_date):
             return h['total_points']
     return 0
 
+# --- ADMIN PAGE LOGIC ---
+if st.query_params.get("admin") == "true":
+    st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
+    
+    password = st.text_input("Enter Admin Password", type="password")
+    
+    if password == ADMIN_PASSWORD:
+        st.success("Access Granted")
+        
+        col1, col2 = st.columns([1, 6])
+        with col1:
+            if st.button("Refresh Logs"):
+                st.rerun()
+        
+        # Source Indicator
+        if get_firestore_db():
+            st.caption("Data Source: Google Cloud Firestore (Persistent)")
+        else:
+            st.caption("Data Source: Local SQLite (Ephemeral)")
+
+        # Logs Table
+        logs_df = get_all_logs()
+        st.dataframe(logs_df, use_container_width=True, hide_index=True)
+        
+        # Download
+        csv = logs_df.to_csv(index=False)
+        st.download_button("Download Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
+        
+    elif password:
+        st.error("Incorrect Password")
+        
+    # IMPORTANT: Stop execution so the optimizer interface is NOT shown
+    st.stop()
+
 # --- MAIN APP UI ---
 
 st.title("🏀 NBA Fantasy Optimizer (Live)")
@@ -252,30 +286,6 @@ with st.sidebar:
     
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
-    
-    # --- ADMIN PANEL (HIDDEN) ---
-    # Only visible if URL contains ?admin=true
-    if st.query_params.get("admin") == "true":
-        st.markdown("---")
-        with st.expander("Admin Access"):
-            password = st.text_input("Password", type="password")
-            if password == ADMIN_PASSWORD:
-                st.success("Access Granted")
-                if st.button("Refresh Logs"):
-                    st.rerun()
-                
-                if get_firestore_db():
-                    st.caption("Source: Google Cloud Firestore (Persistent)")
-                else:
-                    st.caption("Source: Local SQLite (Ephemeral)")
-
-                logs_df = get_all_logs()
-                st.dataframe(logs_df, hide_index=True)
-                
-                csv = logs_df.to_csv(index=False)
-                st.download_button("Download Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
-            elif password:
-                st.error("Incorrect Password")
 
 if run_btn:
     # --- START LOGGING ---
