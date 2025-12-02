@@ -75,6 +75,8 @@ def fetch_my_team(team_id, event_id):
 def calculate_selling_price(purchase_price, now_cost):
     """
     Calculates selling price based on 50% sell-on fee logic.
+    Fee is 50% of profit, rounded up to nearest 0.1m.
+    Prices are in integer units (e.g., 52 = 5.2m).
     """
     if now_cost <= purchase_price:
         return now_cost
@@ -170,7 +172,7 @@ if run_btn:
     my_team_data = fetch_my_team(team_id_input, roster_source_event_id)
     
     if not my_team_data:
-        st.error(f"Could not fetch data for Team ID {team_id_input} at Event {roster_source_event_id}. Check ID or Gameweek.")
+        st.error(f"Could not fetch data for Team ID {team_id_input}. Check ID or Gameweek.")
         st.stop()
         
     picks = my_team_data['picks']
@@ -199,9 +201,7 @@ if run_btn:
             
             roster_data.append({
                 "Player": p_row['web_name'].values[0],
-                "Bought": f"{purchase_price/10}m",
-                "Current": f"{now_cost/10}m",
-                "Selling Price": f"{sell_price/10}m"
+                "Current Price": f"{now_cost/10}m"
             })
         st.dataframe(pd.DataFrame(roster_data))
 
