@@ -130,7 +130,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Simulation Mode")
     use_sim_mode = st.checkbox("Simulate specific Game Day?")
-    sim_game_day = st.number_input("Current Game Day of Week 1 (1-7)", min_value=1, max_value=7, value=1, disabled=not use_sim_mode)
+    sim_game_day = st.number_input("Current Game Day of start Gameweek (1-7)", min_value=1, max_value=7, value=1, disabled=not use_sim_mode)
     
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
@@ -251,7 +251,7 @@ if run_btn:
                 gw_num = event_to_gw_map.get(eid)
                 if gw_num:
                     for p in data['picks']:
-                        # Check multiplier > 1 for actual captain usage
+                        # Only mark captain used if multiplier > 1
                         if p['is_captain'] and p['multiplier'] > 1:
                             captain_used_map[gw_num] = True
                             break
@@ -293,13 +293,16 @@ if run_btn:
         
     total_budget_safe = current_roster_liquidation_value + my_bank - safety_margin
     
+    # Get current gameweek number for labels
+    current_gw_num = weeks_schedule[0]['gw']
+    
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Banked Points (GW1)", f"{banked_points:.1f}")
-    c2.metric("Transfers Left (GW1)", transfers_limit_map[weeks_schedule[0]['gw']])
+    c1.metric(f"Banked Points (GW{current_gw_num})", f"{banked_points:.1f}")
+    c2.metric(f"Transfers Left (GW{current_gw_num})", transfers_limit_map[current_gw_num])
     c3.metric("Budget", f"{total_budget_safe/10}m")
     c4.metric("Optimize Days", len(future_event_ids))
 
-    # 6. Stats
+    # 5. Calculate Stats for Candidates
     status_text.text("Calculating player stats (Last 5 Avg)...")
     available_players = active_players[
         (active_players['chance_of_playing_next_round'].isnull()) | 
@@ -412,6 +415,7 @@ if run_btn:
     for w_data in weeks_schedule:
         gw_num = w_data['gw']
         gw_events = w_data['events']
+        # FIX: Use the unified variable name defined earlier
         gw_indices = [event_id_to_solver_idx[eid] for eid in gw_events if eid in event_id_to_solver_idx]
         
         if gw_indices:
