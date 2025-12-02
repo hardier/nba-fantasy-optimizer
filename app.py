@@ -7,6 +7,7 @@ from datetime import datetime, date
 import math
 import sqlite3
 import json
+import socket
 
 # --- OPTIONAL: FIREBASE ADMIN FOR CLOUD LOGGING ---
 try:
@@ -53,14 +54,37 @@ def get_firestore_db():
         st.warning(f"Firebase init failed: {e}")
         return None
 
+def get_remote_ip():
+    """Attempts to get the client IP address."""
+    try:
+        # Method 1: Streamlit Context (Newer versions)
+        if hasattr(st, "context") and hasattr(st.context, "headers"):
+            headers = st.context.headers
+            if "X-Forwarded-For" in headers:
+                return headers["X-Forwarded-For"].split(",")[0]
+        
+        # Method 2: WebSocket headers (Older versions/Workarounds)
+        from streamlit.web.server.websocket_headers import _get_websocket_headers
+        headers = _get_websocket_headers()
+        if headers and "X-Forwarded-For" in headers:
+            return headers["X-Forwarded-For"].split(",")[0]
+            
+    except Exception:
+        pass
+    
+    return "Unknown/Local"
+
 def init_local_db():
     """Initializes the SQLite database for local fallback."""
     conn = sqlite3.connect('nba_fantasy_logs.db')
     c = conn.cursor()
+    
+    # Create table if not exists
     c.execute('''
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT,
+            ip_address TEXT,
             team_id INTEGER,
             gameweek INTEGER,
             weeks_planned INTEGER,
@@ -70,12 +94,22 @@ def init_local_db():
             result_summary TEXT
         )
     ''')
+    
+    # Migration: Check if ip_address column exists (for older DBs)
+    c.execute("PRAGMA table_info(logs)")
+    columns = [info[1] for info in c.fetchall()]
+    if 'ip_address' not in columns:
+        c.execute("ALTER TABLE logs ADD COLUMN ip_address TEXT")
+        
     conn.commit()
     conn.close()
 
 def log_simulation_start(team_id, gw, weeks):
     """Logs start to Firestore (if avail) or SQLite."""
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Get current local time with timezone info if possible
+    ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    ip = get_remote_ip()
+    
     db = get_firestore_db()
     
     if db:
@@ -83,6 +117,7 @@ def log_simulation_start(team_id, gw, weeks):
         doc_ref = db.collection("logs").document()
         doc_ref.set({
             "timestamp": ts,
+            "ip_address": ip,
             "team_id": team_id,
             "gameweek": gw,
             "weeks_planned": weeks,
@@ -96,8 +131,8 @@ def log_simulation_start(team_id, gw, weeks):
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
         c.execute(
-            "INSERT INTO logs (timestamp, team_id, gameweek, weeks_planned, status) VALUES (?, ?, ?, ?, ?)",
-            (ts, team_id, gw, weeks, 'STARTED')
+            "INSERT INTO logs (timestamp, ip_address, team_id, gameweek, weeks_planned, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (ts, ip, team_id, gw, weeks, 'STARTED')
         )
         log_id = c.lastrowid
         conn.commit()
@@ -139,8 +174,10 @@ def get_all_logs():
             data = []
             for doc in docs:
                 d = doc.to_dict()
-                # Flatten for dataframe
                 d['id'] = doc.id
+                # Convert firestore timestamp to string
+                if 'created_at' in d and d['created_at']:
+                    d['timestamp'] = d['created_at'].strftime("%Y-%m-%d %H:%M:%S %Z")
                 data.append(d)
             return pd.DataFrame(data)
         except Exception as e:
