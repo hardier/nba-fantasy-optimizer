@@ -124,7 +124,7 @@ st.markdown("Optimize your lineup and transfer strategy based on **Expected Poin
 # Sidebar Inputs
 with st.sidebar:
     st.header("Settings")
-    team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
+    team_id_input = st.number_input("Team ID (0 for 100m scratch)", value=DEFAULT_TEAM_ID, step=1)
     gameweek_input = st.number_input("Gameweek", value=DEFAULT_GAMEWEEK, step=1)
     
     # Safety margin for budget in 0.1m units (e.g., 1 = 0.1m)
@@ -168,51 +168,57 @@ if run_btn:
     st.info(f"Optimization for Gameweek {gameweek_input} (Events {min(target_event_ids)}-{max(target_event_ids)})")
     
     # 3. Fetch User Team & Calculate Budget
-    status_text.text(f"Fetching Roster for Team {team_id_input}...")
-    my_team_data = fetch_my_team(team_id_input, roster_source_event_id)
-    
-    if not my_team_data:
-        st.error(f"Could not fetch data for Team ID {team_id_input}. Check ID or Gameweek.")
-        st.stop()
-        
-    picks = my_team_data['picks']
-    my_bank = my_team_data['entry_history']['bank']
-    
-    my_selling_prices = {}
     my_player_ids = []
-    current_roster_liquidation_value = 0
+    my_selling_prices = {}
     
-    # Display Current Roster Details
-    with st.expander("Current Roster Valuation", expanded=False):
-        roster_data = []
-        for p in picks:
-            pid = p['element']
-            my_player_ids.append(pid)
-            p_row = active_players.loc[active_players['id'] == pid]
+    if team_id_input == 0:
+        st.success("✨ Generating optimal starting lineup from scratch (Budget: 100m)")
+        # 100m = 1000 units
+        total_budget_safe = 1000
+    else:
+        status_text.text(f"Fetching Roster for Team {team_id_input}...")
+        my_team_data = fetch_my_team(team_id_input, roster_source_event_id)
+        
+        if not my_team_data:
+            st.error(f"Could not fetch data for Team ID {team_id_input}. Check ID or Gameweek.")
+            st.stop()
             
-            if p_row.empty: continue
-            
-            now_cost = p_row['now_cost'].values[0]
-            purchase_price = p.get('purchase_price', now_cost)
-            sell_price = calculate_selling_price(purchase_price, now_cost)
-            
-            my_selling_prices[pid] = sell_price
-            current_roster_liquidation_value += sell_price
-            
-            roster_data.append({
-                "Player": p_row['web_name'].values[0],
-                "Current Price": f"{now_cost/10}m"
-            })
-        st.dataframe(pd.DataFrame(roster_data))
+        picks = my_team_data['picks']
+        my_bank = my_team_data['entry_history']['bank']
+        
+        current_roster_liquidation_value = 0
+        
+        # Display Current Roster Details
+        with st.expander("Current Roster Valuation", expanded=False):
+            roster_data = []
+            for p in picks:
+                pid = p['element']
+                my_player_ids.append(pid)
+                p_row = active_players.loc[active_players['id'] == pid]
+                
+                if p_row.empty: continue
+                
+                now_cost = p_row['now_cost'].values[0]
+                purchase_price = p.get('purchase_price', now_cost)
+                sell_price = calculate_selling_price(purchase_price, now_cost)
+                
+                my_selling_prices[pid] = sell_price
+                current_roster_liquidation_value += sell_price
+                
+                roster_data.append({
+                    "Player": p_row['web_name'].values[0],
+                    "Current Price": f"{now_cost/10}m"
+                })
+            st.dataframe(pd.DataFrame(roster_data))
 
-    # Calculate Total Safe Budget
-    total_budget_raw = current_roster_liquidation_value + my_bank
-    total_budget_safe = total_budget_raw - safety_margin
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Liquidation Value", f"{current_roster_liquidation_value/10}m")
-    col2.metric("Bank", f"{my_bank/10}m")
-    col3.metric("Optimizer Budget", f"{total_budget_safe/10}m")
+        # Calculate Total Safe Budget
+        total_budget_raw = current_roster_liquidation_value + my_bank
+        total_budget_safe = total_budget_raw - safety_margin
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Liquidation Value", f"{current_roster_liquidation_value/10}m")
+        col2.metric("Bank", f"{my_bank/10}m")
+        col3.metric("Optimizer Budget", f"{total_budget_safe/10}m")
     
     # 4. Fetch Fixtures
     status_text.text("Fetching fixtures...")
@@ -303,12 +309,14 @@ if run_btn:
                 captain_vars[(pid, d_idx)] = pulp.LpVariable(f"Capt_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
 
     # Constraints
-    for p in players_data:
-        if p['id'] in my_player_ids:
-            prob += roster_vars[(p['id'], 0)] == 1
-        else:
-            if len([x for x in my_player_ids if x in player_eps]) == 10:
-                prob += roster_vars[(p['id'], 0)] == 0
+    # Day 1 Roster Enforcement (Only if not scratch start)
+    if team_id_input != 0:
+        for p in players_data:
+            if p['id'] in my_player_ids:
+                prob += roster_vars[(p['id'], 0)] == 1
+            else:
+                if len([x for x in my_player_ids if x in player_eps]) == 10:
+                    prob += roster_vars[(p['id'], 0)] == 0
 
     prob += pulp.lpSum(trans_in_vars.values()) <= TRANSFERS_ALLOWED
     prob += pulp.lpSum(captain_vars.values()) == 1
@@ -366,11 +374,14 @@ if run_btn:
         proj_score = pulp.value(prob.objective) / 10
         st.success(f"Optimization Successful! Projected Score: {proj_score:.1f}")
         
-        tabs = st.tabs([str(d) for d in game_days])
+        # Use Day 1, Day 2... for tabs instead of exact dates
+        tabs = st.tabs([f"Day {i+1}" for i in range(len(game_days))])
         previous_roster = set()
         
         for d_idx, day in enumerate(game_days):
             with tabs[d_idx]:
+                st.caption(f"Date: {day}") # Show actual date inside tab
+                
                 roster_today = []
                 roster_ids = set()
                 for p in players_data:
