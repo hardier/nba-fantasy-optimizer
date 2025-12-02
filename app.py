@@ -8,7 +8,7 @@ import math
 
 # --- CONFIGURATION ---
 BASE_URL = "https://nbafantasy.nba.com/api"
-DEFAULT_TEAM_ID = 5095
+DEFAULT_TEAM_ID = 5
 DEFAULT_GAMEWEEK = 7
 
 POSITIONS = {"Back Court": 5, "Front Court": 5}
