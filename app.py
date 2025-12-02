@@ -16,7 +16,7 @@ MAX_PLAYERS_PER_TEAM = 2
 TRANSFERS_ALLOWED = 2
 ROSTER_SIZE = 10
 
-st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide")
+st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide", page_icon="🏀")
 
 # --- HELPER FUNCTIONS ---
 
@@ -91,12 +91,19 @@ def get_player_history_avg(player_id):
     """
     Calculates avg points for last 10 active games.
     Returns None if player is considered injured (0 mins in last 2 games).
+    Excludes current day's data to avoid partial game stats.
     """
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
     
     history = data.get('history', [])
+    
+    # Exclude games from today (or future) to avoid partial/ongoing game data
+    # kick_off_time is typically "YYYY-MM-DDTHH:MM:SSZ"
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    history = [h for h in history if h['kickoff_time'][:10] < today_str]
+    
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
     
     # Injury Check: 0 mins in last 2 recorded games
@@ -130,7 +137,8 @@ with st.sidebar:
     # Safety margin for budget in 0.1m units (e.g., 1 = 0.1m)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0, step=1, help="Reserve this amount to avoid calculation errors.")
     
-    run_btn = st.button("Run Optimization", type="primary")
+    st.markdown("---")
+    run_btn = st.button("RUN OPTIMIZATION", type="primary")
 
 if run_btn:
     status_text = st.empty()
@@ -149,8 +157,16 @@ if run_btn:
     
     # Process Maps
     team_map = pd.Series(teams.name.values, index=teams.id).to_dict()
+    # Create Short Name Map (Use 'short_name' if exists, else first 3 letters)
+    if 'short_name' in teams.columns:
+        team_short_map = pd.Series(teams.short_name.values, index=teams.id).to_dict()
+    else:
+        team_short_map = pd.Series(teams.name.str[:3].str.upper().values, index=teams.id).to_dict()
+
     pos_map = pd.Series(element_types.singular_name.values, index=element_types.id).to_dict()
+    
     elements['team_name'] = elements['team'].map(team_map)
+    elements['team_short'] = elements['team'].map(team_short_map) # Add Short Name
     elements['position_name'] = elements['element_type'].map(pos_map)
     elements['full_name'] = elements['first_name'] + " " + elements['second_name']
     
@@ -207,9 +223,10 @@ if run_btn:
                 
                 roster_data.append({
                     "Player": p_row['web_name'].values[0],
-                    "Current Price": f"{now_cost/10}m"
+                    "Team": p_row['team_short'].values[0],
+                    "Selling Price": f"{sell_price/10}m"
                 })
-            st.dataframe(pd.DataFrame(roster_data))
+            st.dataframe(pd.DataFrame(roster_data), use_container_width=True)
 
         # Calculate Total Safe Budget
         total_budget_raw = current_roster_liquidation_value + my_bank
@@ -295,7 +312,9 @@ if run_btn:
             'id': pid,
             'name': p_row['web_name'],
             'full_name': p_row['full_name'],
+            'team_short': p_row['team_short'], # Add short name
             'cost': effective_cost,
+            'current_val': p_row['now_cost'], # For display
             'pos': simple_pos,
             'team': p_row['team'],
             'ep': ep
@@ -436,7 +455,9 @@ if run_btn:
                     
                     lineup_data.append({
                         "Name": p['name'],
+                        "Team": p['team_short'], # Add Team
                         "Pos": p['pos'],
+                        "Value": f"{p['current_val']/10}m", # Add Value
                         "Role": status,
                         "Exp Pts": f"{points:.1f}"
                     })
