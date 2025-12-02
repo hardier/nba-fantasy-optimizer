@@ -63,6 +63,10 @@ def calculate_selling_price(purchase_price, now_cost):
 
 @st.cache_data(ttl=86400)
 def get_player_history_avg(player_id):
+    """
+    Calculates avg points for last 5 active games.
+    Active means total_points > 0.
+    """
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
@@ -72,17 +76,21 @@ def get_player_history_avg(player_id):
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
     
+    # Injury Check: Still assume injured if 0 mins in last 2 *recorded* games
     if len(history) >= 2:
         m1 = int(history[0].get('minutes', 0))
         m2 = int(history[1].get('minutes', 0))
         if m1 == 0 and m2 == 0: return None
 
-    played_games = [g for g in history if int(g.get('minutes', 0)) > 0]
-    last_10 = played_games[:10]
+    # Filter: Active = Points > 0
+    played_games = [g for g in history if g.get('total_points', 0) > 0]
     
-    if not last_10: return 0.0
-    total_points = sum(g['total_points'] for g in last_10)
-    return total_points / len(last_10)
+    # Take last 5
+    last_5 = played_games[:5]
+    
+    if not last_5: return 0.0
+    total_points = sum(g['total_points'] for g in last_5)
+    return total_points / len(last_5)
 
 # --- MAIN APP UI ---
 
@@ -226,7 +234,8 @@ if run_btn:
                 gw_num = event_to_gw_map.get(eid)
                 if gw_num:
                     for p in data['picks']:
-                        if p['is_captain']:
+                        # Only mark captain used if multiplier > 1
+                        if p['is_captain'] and p['multiplier'] > 1:
                             captain_used_map[gw_num] = True
                             break
                 
@@ -274,7 +283,7 @@ if run_btn:
     c4.metric("Optimize Days", len(future_event_ids))
 
     # 6. Stats
-    status_text.text("Calculating player stats...")
+    status_text.text("Calculating player stats (Last 5 Avg)...")
     available_players = active_players[
         (active_players['chance_of_playing_next_round'].isnull()) | 
         (active_players['chance_of_playing_next_round'] > 50)
@@ -444,9 +453,11 @@ if run_btn:
                                     team_short = p_row['team_short'].values[0] if not p_row.empty else "-"
                                     role = "Starter"
                                     if pick['multiplier'] == 0: role = "Bench"
-                                    if pick['is_captain']: role = "CAPTAIN ⭐"
-                                    # FIX: Use .get() to prevent KeyError if points missing
-                                    roster_list.append({"Name": name, "Team": team_short, "Role": role, "Score": pick.get('points', 0)})
+                                    # FIX: Check multiplier > 1 for actual captain usage
+                                    if pick['is_captain'] and pick['multiplier'] > 1: role = "CAPTAIN ⭐"
+                                    # FIX: Divide points by 10 for table
+                                    pts = pick.get('points', 0) / 10.0
+                                    roster_list.append({"Name": name, "Team": team_short, "Role": role, "Score": f"{pts:.1f}"})
                                 st.dataframe(pd.DataFrame(roster_list), use_container_width=True, hide_index=True)
                             else: st.info("No data.")
                         
