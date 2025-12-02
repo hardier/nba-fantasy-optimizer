@@ -21,7 +21,7 @@ except ImportError:
 BASE_URL = "https://nbafantasy.nba.com/api"
 DEFAULT_TEAM_ID = 17
 DEFAULT_GAMEWEEK = 7
-ADMIN_PASSWORD = "admin124"  # Change this for security
+ADMIN_PASSWORD = "admin124"
 
 POSITIONS = {"Back Court": 5, "Front Court": 5}
 MAX_PLAYERS_PER_TEAM = 2
@@ -33,11 +33,8 @@ st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide", page_icon=
 # --- DATABASE & LOGGING FUNCTIONS ---
 
 def get_firestore_db():
-    """Initializes and returns Firestore DB client if secrets are available."""
-    if not FIREBASE_AVAILABLE:
-        return None
-    if "firebase" not in st.secrets:
-        return None
+    if not FIREBASE_AVAILABLE: return None
+    if "firebase" not in st.secrets: return None
     try:
         if not firebase_admin._apps:
             cred_dict = dict(st.secrets["firebase"])
@@ -45,45 +42,34 @@ def get_firestore_db():
             firebase_admin.initialize_app(cred)
         return firestore.client()
     except Exception as e:
-        st.warning(f"Firebase init failed: {e}")
         return None
 
 def get_remote_ip():
-    """Attempts to get the client IP address."""
     try:
-        # Use st.context.headers (Streamlit 1.38+)
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if "X-Forwarded-For" in headers:
                 return headers["X-Forwarded-For"].split(",")[0]
-    except Exception:
-        pass
+    except Exception: pass
     return "Unknown/Local"
 
 def get_ip_location(ip):
-    """Resolves IP to location using free API."""
-    if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]:
-        return "Localhost"
+    if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]: return "Localhost"
     try:
-        # Using ip-api.com (free for non-commercial)
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
         if response.status_code == 200:
             data = response.json()
             if data.get('status') == 'success':
                 return f"{data.get('city')}, {data.get('regionName')}, {data.get('country')}"
-    except:
-        pass
+    except: pass
     return "Unknown Location"
 
 def get_pst_time():
-    """Returns current time in PST string format."""
-    # PST is UTC-8. Simple implementation (ignoring DST complexity for log readability)
     utc = datetime.utcnow()
     pst = utc - timedelta(hours=8)
     return pst.strftime("%Y-%m-%d %H:%M:%S PST")
 
 def init_local_db():
-    """Initializes the SQLite database for local fallback."""
     conn = sqlite3.connect('nba_fantasy_logs.db')
     c = conn.cursor()
     c.execute('''
@@ -101,68 +87,51 @@ def init_local_db():
             result_summary TEXT
         )
     ''')
-    
-    # Migrations
     c.execute("PRAGMA table_info(logs)")
     cols = [info[1] for info in c.fetchall()]
     if 'ip_address' not in cols: c.execute("ALTER TABLE logs ADD COLUMN ip_address TEXT")
     if 'location' not in cols: c.execute("ALTER TABLE logs ADD COLUMN location TEXT")
-        
     conn.commit()
     conn.close()
 
 def log_simulation_start(team_id, gw, weeks):
-    """Logs start with PST time and Location."""
     ts = get_pst_time()
     ip = get_remote_ip()
     loc = get_ip_location(ip)
-    
     db = get_firestore_db()
-    
     if db:
         doc_ref = db.collection("logs").document()
         doc_ref.set({
-            "timestamp": ts,
-            "ip_address": ip,
-            "location": loc,
-            "team_id": team_id,
-            "gameweek": gw,
-            "weeks_planned": weeks,
-            "status": "STARTED",
-            "created_at": firestore.SERVER_TIMESTAMP
+            "timestamp": ts, "ip_address": ip, "location": loc,
+            "team_id": team_id, "gameweek": gw, "weeks_planned": weeks,
+            "status": "STARTED", "created_at": firestore.SERVER_TIMESTAMP
         })
         return doc_ref.id
     else:
         init_local_db()
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
-        c.execute(
-            "INSERT INTO logs (timestamp, ip_address, location, team_id, gameweek, weeks_planned, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (ts, ip, loc, team_id, gw, weeks, 'STARTED')
-        )
+        c.execute("INSERT INTO logs (timestamp, ip_address, location, team_id, gameweek, weeks_planned, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, ip, loc, team_id, gw, weeks, 'STARTED'))
         log_id = c.lastrowid
         conn.commit()
         conn.close()
         return log_id
 
 def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=None):
-    """Updates log with results."""
     db = get_firestore_db()
     if db:
         if log_id:
             db.collection("logs").document(str(log_id)).update({
-                "status": status,
-                "duration_sec": duration,
+                "status": status, "duration_sec": duration,
                 "error_msg": error_msg if error_msg else "",
                 "result_summary": result_summary if result_summary else ""
             })
     else:
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
-        c.execute(
-            "UPDATE logs SET status=?, duration_sec=?, error_msg=?, result_summary=? WHERE id=?",
-            (status, duration, error_msg, result_summary, log_id)
-        )
+        c.execute("UPDATE logs SET status=?, duration_sec=?, error_msg=?, result_summary=? WHERE id=?",
+            (status, duration, error_msg, result_summary, log_id))
         conn.commit()
         conn.close()
 
@@ -176,13 +145,10 @@ def get_all_logs():
                 d = doc.to_dict()
                 d['id'] = doc.id
                 if 'created_at' in d and d['created_at']:
-                    # Keep original PST string if available, else format timestamp
-                    if 'timestamp' not in d: 
-                        d['timestamp'] = d['created_at'].strftime("%Y-%m-%d %H:%M:%S")
+                    if 'timestamp' not in d: d['timestamp'] = d['created_at'].strftime("%Y-%m-%d %H:%M:%S")
                 data.append(d)
             return pd.DataFrame(data)
-        except Exception:
-            return pd.DataFrame()
+        except Exception: return pd.DataFrame()
     else:
         init_local_db()
         conn = sqlite3.connect('nba_fantasy_logs.db')
@@ -231,7 +197,6 @@ def calculate_selling_price(purchase_price, now_cost):
 
 @st.cache_data(ttl=86400)
 def get_player_history_avg(player_id):
-    """Last 5 active games avg (points > 0)."""
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
@@ -266,36 +231,23 @@ if st.query_params.get("admin") == "true":
     if password == ADMIN_PASSWORD:
         st.success("Access Granted")
         if st.button("Refresh Logs"): st.rerun()
-        
-        if get_firestore_db():
-            st.caption("Data Source: Google Cloud Firestore (Persistent)")
-        else:
-            st.caption("Data Source: Local SQLite (Ephemeral)")
-
+        if get_firestore_db(): st.caption("Source: Cloud")
+        else: st.caption("Source: Local")
         logs_df = get_all_logs()
-        
         if not logs_df.empty:
-            # Add a 'date' column for grouping (YYYY-MM-DD)
-            # Timestamp format: "YYYY-MM-DD HH:MM:SS PST"
             logs_df['date_group'] = logs_df['timestamp'].apply(lambda x: str(x)[:10] if x else "Unknown")
             unique_dates = sorted(logs_df['date_group'].unique(), reverse=True)
-            
             st.markdown("### Log History")
-            
             for d in unique_dates:
                 day_logs = logs_df[logs_df['date_group'] == d]
                 count = len(day_logs)
                 with st.expander(f"📅 {d} ({count} logs)", expanded=(d == unique_dates[0])):
                     st.dataframe(day_logs, use_container_width=True, hide_index=True)
-            
             st.markdown("---")
             csv = logs_df.to_csv(index=False)
             st.download_button("Download All Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
-        else:
-            st.info("No logs found.")
-            
-    elif password:
-        st.error("Incorrect Password")
+        else: st.info("No logs found.")
+    elif password: st.error("Incorrect Password")
     st.stop()
 
 # --- MAIN APP UI ---
@@ -303,16 +255,104 @@ if st.query_params.get("admin") == "true":
 st.title("🏀 NBA Fantasy Optimizer (Live)")
 st.markdown("Optimize lineup and transfers accounting for **Mid-Week Progress** across multiple weeks.")
 
+# 1. PRE-FETCH STATIC DATA (Required for Sidebar Logic)
+bootstrap = fetch_bootstrap()
+if not bootstrap:
+    st.error("Failed to fetch NBA Fantasy data. Please try again later.")
+    st.stop()
+
+elements = pd.DataFrame(bootstrap['elements'])
+teams = pd.DataFrame(bootstrap['teams'])
+element_types = pd.DataFrame(bootstrap['element_types'])
+
+team_map = pd.Series(teams.name.values, index=teams.id).to_dict()
+if 'short_name' in teams.columns:
+    team_short_map = pd.Series(teams.short_name.values, index=teams.id).to_dict()
+else:
+    team_short_map = pd.Series(teams.name.str[:3].str.upper().values, index=teams.id).to_dict()
+pos_map = pd.Series(element_types.singular_name.values, index=element_types.id).to_dict()
+
+elements['team_name'] = elements['team'].map(team_map)
+elements['team_short'] = elements['team'].map(team_short_map)
+elements['position_name'] = elements['element_type'].map(pos_map)
+elements['full_name'] = elements['first_name'] + " " + elements['second_name']
+
+active_players = elements[elements['status'] != 'u'].copy()
+
+# SIDEBAR
 with st.sidebar:
     st.header("Settings")
     team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
     gameweek_input = st.number_input("Start Gameweek", value=DEFAULT_GAMEWEEK, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
+    
     st.markdown("---")
     st.caption("Simulation Mode")
     use_sim_mode = st.checkbox("Simulate specific Game Day?")
     sim_game_day = st.number_input("Current Game Day of start Gameweek (1-7)", min_value=1, max_value=7, value=1, disabled=not use_sim_mode)
+    
+    st.markdown("---")
+    
+    # --- PRE-CALCULATE ROSTER FOR MANUAL DROP SELECTOR ---
+    # We need to know the roster to populate the dropdown BEFORE run is clicked.
+    
+    # 1. Get GW Events
+    gw_events = get_gameweek_event_range(bootstrap, gameweek_input)
+    gw_events.sort()
+    
+    # 2. Determine "Today" (Simulated or Real)
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    
+    # Determine Roster Source Logic (simplified for UI selector)
+    roster_source_eid = None
+    if gw_events:
+        # Default to start of week - 1
+        roster_source_eid = gw_events[0] - 1
+        
+        # Refine if simulation/mid-week
+        fixtures_data = fetch_fixtures() # Use cached
+        if fixtures_data:
+            fixtures = pd.DataFrame(fixtures_data)
+            gw_fixtures = fixtures[fixtures['event'].isin(gw_events)].copy()
+            event_dates = {}
+            for eid in gw_events:
+                f = gw_fixtures[gw_fixtures['event'] == eid]
+                if not f.empty: event_dates[eid] = f.iloc[0]['kickoff_time'][:10]
+                else: event_dates[eid] = "9999"
+            
+            if use_sim_mode:
+                split_idx = sim_game_day - 1
+                past_eids = gw_events[:split_idx]
+                if past_eids: roster_source_eid = past_eids[-1]
+            else:
+                past_eids = [eid for eid in gw_events if event_dates.get(eid, "9999") < today_str]
+                if past_eids: roster_source_eid = past_eids[-1]
+
+    # 3. Fetch Roster for Dropdown
+    current_roster_names = {} # {name: id}
+    if roster_source_eid:
+        team_data = fetch_picks(team_id_input, event_id=roster_source_eid)
+        # Fallback logic handled in fetch_picks wrapper normally, but here manual:
+        if not team_data:
+             team_data = fetch_picks(team_id_input, roster_source_eid - 1)
+        
+        if team_data:
+            for p in team_data['picks']:
+                pid = p['element']
+                p_row = active_players.loc[active_players['id'] == pid]
+                if not p_row.empty:
+                    name = f"{p_row['web_name'].values[0]} ({p_row['team_short'].values[0]})"
+                    current_roster_names[name] = pid
+
+    # 4. Render Dropdown
+    forced_drop_names = st.multiselect(
+        "Force Transfer Out (Start of Sim):",
+        options=list(current_roster_names.keys()),
+        help="Select players you want to guarantee are sold immediately."
+    )
+    forced_drop_ids = [current_roster_names[n] for n in forced_drop_names]
+
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
 
@@ -324,28 +364,7 @@ if run_btn:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 1. Fetch Data
-        status_text.text("Fetching game data...")
-        bootstrap = fetch_bootstrap()
-        if not bootstrap: raise Exception("Failed to fetch bootstrap")
-        
-        elements = pd.DataFrame(bootstrap['elements'])
-        teams = pd.DataFrame(bootstrap['teams'])
-        element_types = pd.DataFrame(bootstrap['element_types'])
-        
-        team_map = pd.Series(teams.name.values, index=teams.id).to_dict()
-        if 'short_name' in teams.columns:
-            team_short_map = pd.Series(teams.short_name.values, index=teams.id).to_dict()
-        else:
-            team_short_map = pd.Series(teams.name.str[:3].str.upper().values, index=teams.id).to_dict()
-        pos_map = pd.Series(element_types.singular_name.values, index=element_types.id).to_dict()
-        
-        elements['team_name'] = elements['team'].map(team_map)
-        elements['team_short'] = elements['team'].map(team_short_map)
-        elements['position_name'] = elements['element_type'].map(pos_map)
-        elements['full_name'] = elements['first_name'] + " " + elements['second_name']
-        
-        active_players = elements[elements['status'] != 'u'].copy()
+        # Data already fetched above (bootstrap, active_players), reusing...
         
         # 2. Determine Schedule
         status_text.text(f"Building schedule for {weeks_to_optimize} weeks...")
@@ -366,7 +385,8 @@ if run_btn:
         
         if not all_target_event_ids: raise Exception("No valid events found")
 
-        fixtures_data = fetch_fixtures()
+        # Fixtures already fetched for sidebar check, reusing logic to map all
+        fixtures_data = fetch_fixtures() # Cached
         fixtures = pd.DataFrame(fixtures_data)
         gw_fixtures = fixtures[fixtures['event'].isin(all_target_event_ids)].copy()
         
@@ -394,11 +414,12 @@ if run_btn:
         if not future_event_ids: raise Exception("All selected gameweeks have concluded")
 
         event_id_to_solver_idx = {eid: i for i, eid in enumerate(future_event_ids)}
+        # Roster source determined dynamically
         roster_source_event_id = past_event_ids[-1] if past_event_ids else week1_events[0] - 1
 
         # 4. Analyze History
         banked_points_total = 0.0
-        banked_points_by_gw = {} # {gw: points}
+        banked_points_by_gw = {}
         transfers_used_w1 = 0
         past_day_stats = {} 
         captain_used_map = {w['gw']: False for w in weeks_schedule}
@@ -413,8 +434,7 @@ if run_btn:
                     banked_points_total += daily_pts
                     
                     gw = event_to_gw_map.get(eid)
-                    if gw:
-                        banked_points_by_gw[gw] = banked_points_by_gw.get(gw, 0.0) + daily_pts
+                    if gw: banked_points_by_gw[gw] = banked_points_by_gw.get(gw, 0.0) + daily_pts
                     
                     if eid in week1_events:
                         transfers_used_w1 += data['entry_history']['event_transfers']
@@ -424,7 +444,6 @@ if run_btn:
                             if p['is_captain'] and p['multiplier'] > 1:
                                 captain_used_map[gw] = True
                                 break
-                    
                     past_day_stats[eid] = {'score': daily_pts, 'picks': data['picks']}
         
         transfers_limit_map = {}
@@ -433,12 +452,12 @@ if run_btn:
             limit = max(0, TRANSFERS_ALLOWED - transfers_used_w1) if i == 0 else TRANSFERS_ALLOWED
             transfers_limit_map[gw_num] = limit
 
-        # 5. Fetch Initial Roster
+        # 5. Fetch Initial Roster (For Solver)
         status_text.text("Fetching initial roster...")
         my_team_data = fetch_picks(team_id_input, roster_source_event_id)
         if not my_team_data and not past_event_ids:
             my_team_data = fetch_picks(team_id_input, roster_source_event_id - 1)
-        if not my_team_data: raise Exception(f"Could not fetch initial roster")
+        if not my_team_data: raise Exception(f"Could not fetch initial roster for team {team_id_input}")
             
         picks = my_team_data['picks']
         my_bank = my_team_data['entry_history']['bank']
@@ -458,7 +477,7 @@ if run_btn:
         total_budget_safe = current_roster_liquidation_value + my_bank - safety_margin
         
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Banked (Total)", f"{banked_points_total:.1f}")
+        c1.metric("Banked Points (GW1)", f"{banked_points_total:.1f}")
         c2.metric("Transfers Left (GW1)", transfers_limit_map[weeks_schedule[0]['gw']])
         c3.metric("Budget", f"{total_budget_safe/10}m")
         c4.metric("Optimize Days", len(future_event_ids))
@@ -493,7 +512,7 @@ if run_btn:
         progress_bar.progress(95)
         
         teams_list = elements['team'].unique()
-        bc_players_all = [p for p in elements['id'] if elements.loc[elements['id']==p, 'position_name'].values[0] in ["Guard", "Back Court"]]
+        bc_players_all = [p for p in elements['id'] if elements.loc[elements['id']==p, 'position_name'].values[0] in ["Guard", "Back Court"]] # Logic handled in data prep below
         
         players_data = []
         for pid, ep in player_eps.items():
@@ -519,10 +538,12 @@ if run_btn:
 
         num_future_days = len(future_event_ids)
         
+        # OPTION GENERATION LOOP
         previous_solutions_constraints = []
-        option_tabs = st.tabs(["🏆 Option 1", "🥈 Option 2", "🥉 Option 3"])
         
-        best_total_score = 0
+        option_tabs = st.tabs(["🏆 Option 1 (Best)", "🥈 Option 2", "🥉 Option 3"])
+        
+        best_total_score = 0 # To store for log
         
         for opt_idx in range(3):
             status_text.text(f"Calculating Option {opt_idx + 1}...")
@@ -550,6 +571,16 @@ if run_btn:
                 for d_idx in range(1, num_future_days):
                     prob += trans_in_vars[(pid, d_idx)] >= roster_vars[(pid, d_idx)] - roster_vars[(pid, d_idx-1)]
 
+            # --- FORCE DROP CONSTRAINT ---
+            for pid in forced_drop_ids:
+                # Player must NOT be in roster on Day 0 (effective immediate transfer out)
+                # Only need to constrain day 0, continuity handles the rest unless bought back later (unlikely if optimized)
+                # But to be safe, prevent them from being in the roster at all for this sim
+                for d_idx in range(num_future_days):
+                    if (pid, d_idx) in roster_vars:
+                         prob += roster_vars[(pid, d_idx)] == 0
+
+            teams_list = elements['team'].unique()
             bc_players = [p for p in players_data if p['pos'] == "Back Court"]
             fc_players = [p for p in players_data if p['pos'] == "Front Court"]
             total_obj = 0
@@ -584,6 +615,7 @@ if run_btn:
             for w_data in weeks_schedule:
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
+                
                 if gw_indices:
                     week_transfers = []
                     for d_idx in gw_indices:
@@ -622,7 +654,6 @@ if run_btn:
             total_proj = banked_points_total + future_proj
             if opt_idx == 0: best_total_score = total_proj
             
-            # Breakdown calculation
             gw_breakdown = {}
             for w_data in weeks_schedule:
                 gw = w_data['gw']
@@ -639,7 +670,6 @@ if run_btn:
                 gw_breakdown[gw] = gw_total
 
             with option_tabs[opt_idx]:
-                # Score Cards
                 cols = st.columns(len(gw_breakdown) + 1)
                 cols[0].metric("Total Score", f"{total_proj:.1f}")
                 for i, (gw, score) in enumerate(gw_breakdown.items()):
