@@ -41,8 +41,7 @@ def fetch_fixtures():
 
 def get_gameweek_event_range(bootstrap, gameweek):
     """
-    Dynamically finds the start and stop event IDs for a given Gameweek
-    using the 'phases' data from bootstrap-static.
+    Dynamically finds the start and stop event IDs for a given Gameweek.
     """
     phases = bootstrap.get('phases', [])
     target_phase = None
@@ -75,14 +74,11 @@ def fetch_my_team(team_id, event_id):
 def calculate_selling_price(purchase_price, now_cost):
     """
     Calculates selling price based on 50% sell-on fee logic.
-    Fee is 50% of profit, rounded up to nearest 0.1m.
-    Prices are in integer units (e.g., 52 = 5.2m).
     """
     if now_cost <= purchase_price:
         return now_cost
     
     profit = now_cost - purchase_price
-    # Fee is 50% of profit, rounded up.
     fee = math.ceil(profit / 2)
     return now_cost - fee
 
@@ -90,8 +86,6 @@ def calculate_selling_price(purchase_price, now_cost):
 def get_player_history_avg(player_id):
     """
     Calculates avg points for last 10 active games.
-    Returns None if player is considered injured (0 mins in last 2 games).
-    Excludes current day's data to avoid partial game stats.
     """
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
@@ -99,8 +93,7 @@ def get_player_history_avg(player_id):
     
     history = data.get('history', [])
     
-    # Exclude games from today (or future) to avoid partial/ongoing game data
-    # kick_off_time is typically "YYYY-MM-DDTHH:MM:SSZ"
+    # Exclude games from today (or future) to avoid partial stats
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
     
@@ -133,10 +126,7 @@ with st.sidebar:
     st.header("Settings")
     team_id_input = st.number_input("Team ID (0 for 100m scratch)", value=DEFAULT_TEAM_ID, step=1)
     gameweek_input = st.number_input("Gameweek", value=DEFAULT_GAMEWEEK, step=1)
-    
-    # Safety margin for budget in 0.1m units (e.g., 1 = 0.1m)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0, step=1, help="Reserve this amount to avoid calculation errors.")
-    
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
 
@@ -157,7 +147,6 @@ if run_btn:
     
     # Process Maps
     team_map = pd.Series(teams.name.values, index=teams.id).to_dict()
-    # Create Short Name Map (Use 'short_name' if exists, else first 3 letters)
     if 'short_name' in teams.columns:
         team_short_map = pd.Series(teams.short_name.values, index=teams.id).to_dict()
     else:
@@ -166,13 +155,13 @@ if run_btn:
     pos_map = pd.Series(element_types.singular_name.values, index=element_types.id).to_dict()
     
     elements['team_name'] = elements['team'].map(team_map)
-    elements['team_short'] = elements['team'].map(team_short_map) # Add Short Name
+    elements['team_short'] = elements['team'].map(team_short_map)
     elements['position_name'] = elements['element_type'].map(pos_map)
     elements['full_name'] = elements['first_name'] + " " + elements['second_name']
     
     active_players = elements[elements['status'] != 'u'].copy()
     
-    # 2. Determine Gameweek Range (DYNAMICALLY)
+    # 2. Determine Gameweek Range
     status_text.text(f"Determining schedule for Gameweek {gameweek_input}...")
     target_event_ids = get_gameweek_event_range(bootstrap, gameweek_input)
     
@@ -180,6 +169,9 @@ if run_btn:
         st.error(f"Could not find schedule for 'Gameweek {gameweek_input}' in API data.")
         st.stop()
         
+    # FIX: Ensure event IDs are sorted to iterate chronologically
+    target_event_ids.sort()
+    
     roster_source_event_id = min(target_event_ids) - 1
     st.info(f"Optimization for Gameweek {gameweek_input} (Events {min(target_event_ids)}-{max(target_event_ids)})")
     
@@ -189,7 +181,6 @@ if run_btn:
     
     if team_id_input == 0:
         st.success("✨ Generating optimal starting lineup from scratch (Budget: 100m)")
-        # 100m = 1000 units
         total_budget_safe = 1000 - safety_margin
     else:
         status_text.text(f"Fetching Roster for Team {team_id_input}...")
@@ -204,7 +195,6 @@ if run_btn:
         
         current_roster_liquidation_value = 0
         
-        # Display Current Roster Details
         with st.expander("Current Roster Valuation", expanded=False):
             roster_data = []
             for p in picks:
@@ -228,7 +218,6 @@ if run_btn:
                 })
             st.dataframe(pd.DataFrame(roster_data), use_container_width=True)
 
-        # Calculate Total Safe Budget
         total_budget_raw = current_roster_liquidation_value + my_bank
         total_budget_safe = total_budget_raw - safety_margin
         
@@ -237,19 +226,25 @@ if run_btn:
         col2.metric("Bank", f"{my_bank/10}m")
         col3.metric("Optimizer Budget", f"{total_budget_safe/10}m")
     
-    # 4. Fetch Fixtures
+    # 4. Fetch Fixtures & Map to Events
     status_text.text("Fetching fixtures...")
     fixtures_data = fetch_fixtures()
     fixtures = pd.DataFrame(fixtures_data)
     gw_fixtures = fixtures[fixtures['event'].isin(target_event_ids)].copy()
-    gw_fixtures['day_date'] = pd.to_datetime(gw_fixtures['kickoff_time']).dt.date
-    game_days = sorted(gw_fixtures['day_date'].unique())
     
+    # FIX: Group by Event ID (Game Day) instead of calendar date
+    # This prevents timezone splitting (e.g. UTC midnight split)
+    # We create a map: player_id -> set of event_indices (0, 1, 2...)
+    event_id_to_idx = {eid: i for i, eid in enumerate(target_event_ids)}
+    
+    # Pre-index players by team for speed
+    team_rosters = {}
+    for team_id in teams['id']:
+        team_rosters[team_id] = active_players[active_players['team'] == team_id]['id'].tolist()
+        
     # 5. Calculate Stats
     status_text.text("Calculating player stats (Last 10 Avg)...")
     
-    # FILTER: Filter out players with chance_of_playing_next_round <= 50% for TRANSFERS
-    # We allow them if they are already in the team (to calculate selling), but handle them in loop.
     available_players = active_players[
         (active_players['chance_of_playing_next_round'].isnull()) | 
         (active_players['chance_of_playing_next_round'] > 50)
@@ -257,8 +252,6 @@ if run_btn:
     
     top_candidates = available_players.sort_values('total_points', ascending=False).head(200)
     candidate_ids = set(top_candidates['id'].tolist())
-    
-    # Always include current team in fetch list
     for pid in my_player_ids:
         candidate_ids.add(pid)
         
@@ -272,8 +265,6 @@ if run_btn:
             progress_bar.progress(int((i / total_players) * 90))
             
         pid = player['id']
-        
-        # Check Explicit Injury (chance <= 50)
         chance = player['chance_of_playing_next_round']
         is_doubtful = False
         if pd.notna(chance) and chance <= 50:
@@ -281,12 +272,11 @@ if run_btn:
             
         avg = get_player_history_avg(pid)
         
-        # Logic: If injured (via history OR status), effectively 0 pts
         if avg is None or is_doubtful:
             if pid in my_player_ids:
-                avg = 0.0 # Keep owned but zero score
+                avg = 0.0
             else:
-                continue # Skip buying
+                continue
                 
         player_eps[pid] = avg
 
@@ -297,12 +287,12 @@ if run_btn:
     prob = pulp.LpProblem("NBA_Fantasy", pulp.LpMaximize)
     
     players_data = []
+    # Only process players we have stats for
     for pid, ep in player_eps.items():
         p_row = elements[elements['id'] == pid].iloc[0]
         pos = p_row['position_name']
         simple_pos = "Back Court" if ("Guard" in pos or "Back" in pos) else "Front Court"
         
-        # Cost Logic: Owned = Selling Price, New = Market Price
         if pid in my_selling_prices:
             effective_cost = my_selling_prices[pid]
         else:
@@ -312,34 +302,48 @@ if run_btn:
             'id': pid,
             'name': p_row['web_name'],
             'full_name': p_row['full_name'],
-            'team_short': p_row['team_short'], # Add short name
+            'team_short': p_row['team_short'],
             'cost': effective_cost,
-            'current_val': p_row['now_cost'], # For display
+            'current_val': p_row['now_cost'],
             'pos': simple_pos,
             'team': p_row['team'],
             'ep': ep
         })
-        
+    
+    # Build Player Schedule based on Event IDs
+    player_schedule = {p['id']: set() for p in players_data}
+    
+    # Iterate fixtures and map to 0-based index
+    for _, f in gw_fixtures.iterrows():
+        eid = f['event']
+        if eid in event_id_to_idx:
+            day_idx = event_id_to_idx[eid]
+            h_team = f['team_h']
+            a_team = f['team_a']
+            
+            # Find players in players_data that belong to these teams
+            # (Looping players_data is safe as it's filtered subset)
+            for p in players_data:
+                if p['team'] == h_team or p['team'] == a_team:
+                    player_schedule[p['id']].add(day_idx)
+
     # Variables
     roster_vars = {} 
     trans_in_vars = {}
     starter_vars = {} 
     captain_vars = {}
     
-    player_schedule = {p['id']: set() for p in players_data}
-    for _, f in gw_fixtures.iterrows():
-        for p in players_data:
-            if p['team'] == f['team_h'] or p['team'] == f['team_a']:
-                player_schedule[p['id']].add(f['day_date'])
-
-    for d_idx, day in enumerate(game_days):
+    # Use index 0 to N for days
+    num_days = len(target_event_ids)
+    
+    for d_idx in range(num_days):
         for p in players_data:
             pid = p['id']
             roster_vars[(pid, d_idx)] = pulp.LpVariable(f"Roster_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
             if d_idx > 0:
                 trans_in_vars[(pid, d_idx)] = pulp.LpVariable(f"In_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
             
-            if day in player_schedule[pid]:
+            if d_idx in player_schedule[pid]:
                 starter_vars[(pid, d_idx)] = pulp.LpVariable(f"Start_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
                 captain_vars[(pid, d_idx)] = pulp.LpVariable(f"Capt_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
 
@@ -360,7 +364,7 @@ if run_btn:
     
     total_obj = 0
     
-    for d_idx, day in enumerate(game_days):
+    for d_idx in range(num_days):
         current_roster = [roster_vars[(p['id'], d_idx)] for p in players_data]
         
         prob += pulp.lpSum(current_roster) == ROSTER_SIZE
@@ -407,12 +411,18 @@ if run_btn:
         proj_score = pulp.value(prob.objective) / 10
         st.success(f"Optimization Successful! Projected Score: {proj_score:.1f}")
         
-        tabs = st.tabs([f"Day {i+1}" for i in range(len(game_days))])
+        tabs = st.tabs([f"Day {i+1}" for i in range(num_days)])
         previous_roster = set()
         
-        for d_idx, day in enumerate(game_days):
+        for d_idx in range(num_days):
             with tabs[d_idx]:
-                st.caption(f"Date: {day}") # Show actual date inside tab
+                # Get Date for Caption from gw_fixtures based on event_id
+                current_event_id = target_event_ids[d_idx]
+                day_matches = gw_fixtures[gw_fixtures['event'] == current_event_id]
+                if not day_matches.empty:
+                    # Parse first game time for date display
+                    date_str = day_matches.iloc[0]['kickoff_time'][:10]
+                    st.caption(f"Date: {date_str} (Event {current_event_id})")
                 
                 roster_today = []
                 roster_ids = set()
@@ -450,14 +460,14 @@ if run_btn:
                         if (pid, d_idx) in captain_vars and captain_vars[(pid, d_idx)].varValue > 0.5:
                             status = "CAPTAIN ⭐"
                             points *= 2
-                    elif day not in player_schedule[pid]:
+                    elif d_idx not in player_schedule[pid]:
                         status = "No Game"
                     
                     lineup_data.append({
                         "Name": p['name'],
-                        "Team": p['team_short'], # Add Team
+                        "Team": p['team_short'],
                         "Pos": p['pos'],
-                        "Value": f"{p['current_val']/10}m", # Add Value
+                        "Value": f"{p['current_val']/10}m",
                         "Role": status,
                         "Exp Pts": f"{points:.1f}"
                     })
