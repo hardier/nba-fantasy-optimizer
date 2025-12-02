@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import pulp
 import time
-from datetime import datetime, date
+from datetime import datetime, timedelta
 import math
 import sqlite3
 import json
@@ -36,19 +36,13 @@ def get_firestore_db():
     """Initializes and returns Firestore DB client if secrets are available."""
     if not FIREBASE_AVAILABLE:
         return None
-    
-    # Check if firebase config is in Streamlit secrets
     if "firebase" not in st.secrets:
         return None
-
     try:
-        # Check if app is already initialized to avoid error on rerun
         if not firebase_admin._apps:
-            # Create a credential object from the secrets dictionary
             cred_dict = dict(st.secrets["firebase"])
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
-        
         return firestore.client()
     except Exception as e:
         st.warning(f"Firebase init failed: {e}")
@@ -57,34 +51,47 @@ def get_firestore_db():
 def get_remote_ip():
     """Attempts to get the client IP address."""
     try:
-        # Method 1: Streamlit Context (Newer versions)
+        # Use st.context.headers (Streamlit 1.38+)
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if "X-Forwarded-For" in headers:
                 return headers["X-Forwarded-For"].split(",")[0]
-        
-        # Method 2: WebSocket headers (Older versions/Workarounds)
-        from streamlit.web.server.websocket_headers import _get_websocket_headers
-        headers = _get_websocket_headers()
-        if headers and "X-Forwarded-For" in headers:
-            return headers["X-Forwarded-For"].split(",")[0]
-            
     except Exception:
         pass
-    
     return "Unknown/Local"
+
+def get_ip_location(ip):
+    """Resolves IP to location using free API."""
+    if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]:
+        return "Localhost"
+    try:
+        # Using ip-api.com (free for non-commercial)
+        response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('status') == 'success':
+                return f"{data.get('city')}, {data.get('regionName')}, {data.get('country')}"
+    except:
+        pass
+    return "Unknown Location"
+
+def get_pst_time():
+    """Returns current time in PST string format."""
+    # PST is UTC-8. Simple implementation (ignoring DST complexity for log readability)
+    utc = datetime.utcnow()
+    pst = utc - timedelta(hours=8)
+    return pst.strftime("%Y-%m-%d %H:%M:%S PST")
 
 def init_local_db():
     """Initializes the SQLite database for local fallback."""
     conn = sqlite3.connect('nba_fantasy_logs.db')
     c = conn.cursor()
-    
-    # Create table if not exists
     c.execute('''
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT,
             ip_address TEXT,
+            location TEXT,
             team_id INTEGER,
             gameweek INTEGER,
             weeks_planned INTEGER,
@@ -95,44 +102,43 @@ def init_local_db():
         )
     ''')
     
-    # Migration: Check if ip_address column exists (for older DBs)
+    # Migrations
     c.execute("PRAGMA table_info(logs)")
-    columns = [info[1] for info in c.fetchall()]
-    if 'ip_address' not in columns:
-        c.execute("ALTER TABLE logs ADD COLUMN ip_address TEXT")
+    cols = [info[1] for info in c.fetchall()]
+    if 'ip_address' not in cols: c.execute("ALTER TABLE logs ADD COLUMN ip_address TEXT")
+    if 'location' not in cols: c.execute("ALTER TABLE logs ADD COLUMN location TEXT")
         
     conn.commit()
     conn.close()
 
 def log_simulation_start(team_id, gw, weeks):
-    """Logs start to Firestore (if avail) or SQLite."""
-    # Get current local time with timezone info if possible
-    ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    """Logs start with PST time and Location."""
+    ts = get_pst_time()
     ip = get_remote_ip()
+    loc = get_ip_location(ip)
     
     db = get_firestore_db()
     
     if db:
-        # --- CLOUD LOGGING (FIRESTORE) ---
         doc_ref = db.collection("logs").document()
         doc_ref.set({
             "timestamp": ts,
             "ip_address": ip,
+            "location": loc,
             "team_id": team_id,
             "gameweek": gw,
             "weeks_planned": weeks,
             "status": "STARTED",
             "created_at": firestore.SERVER_TIMESTAMP
         })
-        return doc_ref.id  # Return Document ID string
+        return doc_ref.id
     else:
-        # --- LOCAL LOGGING (SQLITE) ---
         init_local_db()
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
         c.execute(
-            "INSERT INTO logs (timestamp, ip_address, team_id, gameweek, weeks_planned, status) VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, ip, team_id, gw, weeks, 'STARTED')
+            "INSERT INTO logs (timestamp, ip_address, location, team_id, gameweek, weeks_planned, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, ip, loc, team_id, gw, weeks, 'STARTED')
         )
         log_id = c.lastrowid
         conn.commit()
@@ -140,11 +146,9 @@ def log_simulation_start(team_id, gw, weeks):
         return log_id
 
 def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=None):
-    """Updates the log entry with results."""
+    """Updates log with results."""
     db = get_firestore_db()
-    
     if db:
-        # --- CLOUD UPDATE ---
         if log_id:
             db.collection("logs").document(str(log_id)).update({
                 "status": status,
@@ -153,7 +157,6 @@ def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=
                 "result_summary": result_summary if result_summary else ""
             })
     else:
-        # --- LOCAL UPDATE ---
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
         c.execute(
@@ -164,27 +167,23 @@ def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=
         conn.close()
 
 def get_all_logs():
-    """Fetches logs from the active source."""
     db = get_firestore_db()
-    
     if db:
-        # --- FETCH FROM CLOUD ---
         try:
             docs = db.collection("logs").order_by("created_at", direction=firestore.Query.DESCENDING).stream()
             data = []
             for doc in docs:
                 d = doc.to_dict()
                 d['id'] = doc.id
-                # Convert firestore timestamp to string
                 if 'created_at' in d and d['created_at']:
-                    d['timestamp'] = d['created_at'].strftime("%Y-%m-%d %H:%M:%S %Z")
+                    # Keep original PST string if available, else format timestamp
+                    if 'timestamp' not in d: 
+                        d['timestamp'] = d['created_at'].strftime("%Y-%m-%d %H:%M:%S")
                 data.append(d)
             return pd.DataFrame(data)
-        except Exception as e:
-            st.error(f"Error fetching Cloud logs: {e}")
+        except Exception:
             return pd.DataFrame()
     else:
-        # --- FETCH FROM LOCAL ---
         init_local_db()
         conn = sqlite3.connect('nba_fantasy_logs.db')
         df = pd.read_sql_query("SELECT * FROM logs ORDER BY id DESC", conn)
@@ -210,21 +209,17 @@ def fetch_fixtures():
     return fetch_json(f"{BASE_URL}/fixtures/")
 
 def get_gameweek_event_range(bootstrap, gameweek):
-    """Returns list of event IDs for a specific gameweek."""
     phases = bootstrap.get('phases', [])
     target_phase = None
     gw_name = f"Gameweek {gameweek}"
-    
     for phase in phases:
         if phase['name'] == gw_name:
             target_phase = phase
             break
-            
     if not target_phase: return []
     return list(range(target_phase['start_event'], target_phase['stop_event'] + 1))
 
 def fetch_picks(team_id, event_id):
-    """Fetches picks/stats for a specific completed or active event."""
     url = f"{BASE_URL}/entry/{team_id}/event/{event_id}/picks/"
     return fetch_json(url)
 
@@ -236,30 +231,25 @@ def calculate_selling_price(purchase_price, now_cost):
 
 @st.cache_data(ttl=86400)
 def get_player_history_avg(player_id):
-    """Calculates avg points for last 5 active games."""
+    """Last 5 active games avg (points > 0)."""
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
-    
     history = data.get('history', [])
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
-    
     if len(history) >= 2:
         m1 = int(history[0].get('minutes', 0))
         m2 = int(history[1].get('minutes', 0))
         if m1 == 0 and m2 == 0: return None
-
-    played_games = [g for g in history if int(g.get('minutes', 0)) > 0]
+    played_games = [g for g in history if g.get('total_points', 0) > 0]
     last_5 = played_games[:5]
-    
     if not last_5: return 0.0
     total_points = sum(g['total_points'] for g in last_5)
     return total_points / len(last_5)
 
 def get_player_score_for_date(player_id, target_date):
-    """Finds the points scored by a player on a specific date string."""
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0
@@ -269,38 +259,43 @@ def get_player_score_for_date(player_id, target_date):
             return h['total_points']
     return 0
 
-# --- ADMIN PAGE LOGIC ---
+# --- ADMIN PAGE ---
 if st.query_params.get("admin") == "true":
     st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
-    
     password = st.text_input("Enter Admin Password", type="password")
-    
     if password == ADMIN_PASSWORD:
         st.success("Access Granted")
+        if st.button("Refresh Logs"): st.rerun()
         
-        col1, col2 = st.columns([1, 6])
-        with col1:
-            if st.button("Refresh Logs"):
-                st.rerun()
-        
-        # Source Indicator
         if get_firestore_db():
             st.caption("Data Source: Google Cloud Firestore (Persistent)")
         else:
             st.caption("Data Source: Local SQLite (Ephemeral)")
 
-        # Logs Table
         logs_df = get_all_logs()
-        st.dataframe(logs_df, use_container_width=True, hide_index=True)
         
-        # Download
-        csv = logs_df.to_csv(index=False)
-        st.download_button("Download Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
-        
+        if not logs_df.empty:
+            # Add a 'date' column for grouping (YYYY-MM-DD)
+            # Timestamp format: "YYYY-MM-DD HH:MM:SS PST"
+            logs_df['date_group'] = logs_df['timestamp'].apply(lambda x: str(x)[:10] if x else "Unknown")
+            unique_dates = sorted(logs_df['date_group'].unique(), reverse=True)
+            
+            st.markdown("### Log History")
+            
+            for d in unique_dates:
+                day_logs = logs_df[logs_df['date_group'] == d]
+                count = len(day_logs)
+                with st.expander(f"📅 {d} ({count} logs)", expanded=(d == unique_dates[0])):
+                    st.dataframe(day_logs, use_container_width=True, hide_index=True)
+            
+            st.markdown("---")
+            csv = logs_df.to_csv(index=False)
+            st.download_button("Download All Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
+        else:
+            st.info("No logs found.")
+            
     elif password:
         st.error("Incorrect Password")
-        
-    # IMPORTANT: Stop execution so the optimizer interface is NOT shown
     st.stop()
 
 # --- MAIN APP UI ---
@@ -308,24 +303,20 @@ if st.query_params.get("admin") == "true":
 st.title("🏀 NBA Fantasy Optimizer (Live)")
 st.markdown("Optimize lineup and transfers accounting for **Mid-Week Progress** across multiple weeks.")
 
-# Sidebar
 with st.sidebar:
     st.header("Settings")
     team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
     gameweek_input = st.number_input("Start Gameweek", value=DEFAULT_GAMEWEEK, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
-    
     st.markdown("---")
     st.caption("Simulation Mode")
     use_sim_mode = st.checkbox("Simulate specific Game Day?")
     sim_game_day = st.number_input("Current Game Day of start Gameweek (1-7)", min_value=1, max_value=7, value=1, disabled=not use_sim_mode)
-    
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
 
 if run_btn:
-    # --- START LOGGING ---
     start_time = time.time()
     log_id = log_simulation_start(team_id_input, gameweek_input, weeks_to_optimize)
     
@@ -336,8 +327,7 @@ if run_btn:
         # 1. Fetch Data
         status_text.text("Fetching game data...")
         bootstrap = fetch_bootstrap()
-        if not bootstrap:
-            raise Exception("Failed to fetch bootstrap data")
+        if not bootstrap: raise Exception("Failed to fetch bootstrap")
         
         elements = pd.DataFrame(bootstrap['elements'])
         teams = pd.DataFrame(bootstrap['teams'])
@@ -374,8 +364,7 @@ if run_btn:
             all_target_event_ids.extend(ev_range)
             for eid in ev_range: event_to_gw_map[eid] = current_gw
         
-        if not all_target_event_ids:
-            raise Exception("No valid events found in schedule")
+        if not all_target_event_ids: raise Exception("No valid events found")
 
         fixtures_data = fetch_fixtures()
         fixtures = pd.DataFrame(fixtures_data)
@@ -402,14 +391,14 @@ if run_btn:
             past_event_ids = [eid for eid in all_target_event_ids if event_dates.get(eid, "9999") < today_str]
             future_event_ids = [eid for eid in all_target_event_ids if event_dates.get(eid, "0000") >= today_str]
         
-        if not future_event_ids:
-            raise Exception("All selected gameweeks have concluded")
+        if not future_event_ids: raise Exception("All selected gameweeks have concluded")
 
         event_id_to_solver_idx = {eid: i for i, eid in enumerate(future_event_ids)}
         roster_source_event_id = past_event_ids[-1] if past_event_ids else week1_events[0] - 1
 
         # 4. Analyze History
-        banked_points = 0.0
+        banked_points_total = 0.0
+        banked_points_by_gw = {} # {gw: points}
         transfers_used_w1 = 0
         past_day_stats = {} 
         captain_used_map = {w['gw']: False for w in weeks_schedule}
@@ -421,16 +410,19 @@ if run_btn:
                 if data:
                     raw_pts = data['entry_history']['points']
                     daily_pts = raw_pts / 10.0
-                    banked_points += daily_pts
+                    banked_points_total += daily_pts
+                    
+                    gw = event_to_gw_map.get(eid)
+                    if gw:
+                        banked_points_by_gw[gw] = banked_points_by_gw.get(gw, 0.0) + daily_pts
                     
                     if eid in week1_events:
                         transfers_used_w1 += data['entry_history']['event_transfers']
                     
-                    gw_num = event_to_gw_map.get(eid)
-                    if gw_num:
+                    if gw:
                         for p in data['picks']:
                             if p['is_captain'] and p['multiplier'] > 1:
-                                captain_used_map[gw_num] = True
+                                captain_used_map[gw] = True
                                 break
                     
                     past_day_stats[eid] = {'score': daily_pts, 'picks': data['picks']}
@@ -446,8 +438,7 @@ if run_btn:
         my_team_data = fetch_picks(team_id_input, roster_source_event_id)
         if not my_team_data and not past_event_ids:
             my_team_data = fetch_picks(team_id_input, roster_source_event_id - 1)
-        if not my_team_data:
-            raise Exception(f"Could not fetch initial roster for team {team_id_input}")
+        if not my_team_data: raise Exception(f"Could not fetch initial roster")
             
         picks = my_team_data['picks']
         my_bank = my_team_data['entry_history']['bank']
@@ -467,7 +458,7 @@ if run_btn:
         total_budget_safe = current_roster_liquidation_value + my_bank - safety_margin
         
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Banked Points (GW1)", f"{banked_points:.1f}")
+        c1.metric("Banked (Total)", f"{banked_points_total:.1f}")
         c2.metric("Transfers Left (GW1)", transfers_limit_map[weeks_schedule[0]['gw']])
         c3.metric("Budget", f"{total_budget_safe/10}m")
         c4.metric("Optimize Days", len(future_event_ids))
@@ -502,7 +493,7 @@ if run_btn:
         progress_bar.progress(95)
         
         teams_list = elements['team'].unique()
-        bc_players_all = [p for p in elements['id'] if elements.loc[elements['id']==p, 'position_name'].values[0] in ["Guard", "Back Court"]] # Logic handled in data prep below
+        bc_players_all = [p for p in elements['id'] if elements.loc[elements['id']==p, 'position_name'].values[0] in ["Guard", "Back Court"]]
         
         players_data = []
         for pid, ep in player_eps.items():
@@ -528,19 +519,15 @@ if run_btn:
 
         num_future_days = len(future_event_ids)
         
-        # OPTION GENERATION LOOP
         previous_solutions_constraints = []
+        option_tabs = st.tabs(["🏆 Option 1", "🥈 Option 2", "🥉 Option 3"])
         
-        option_tabs = st.tabs(["🏆 Option 1 (Best)", "🥈 Option 2", "🥉 Option 3"])
-        
-        best_total_score = 0 # To store for log
+        best_total_score = 0
         
         for opt_idx in range(3):
             status_text.text(f"Calculating Option {opt_idx + 1}...")
             
             prob = pulp.LpProblem(f"NBA_Fantasy_Opt_{opt_idx}", pulp.LpMaximize)
-            
-            # Variables
             roster_vars = {} 
             trans_in_vars = {}
             starter_vars = {} 
@@ -556,7 +543,6 @@ if run_btn:
                         starter_vars[(pid, d_idx)] = pulp.LpVariable(f"S_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
                         captain_vars[(pid, d_idx)] = pulp.LpVariable(f"C_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
 
-            # Basic Rules
             for p in players_data:
                 pid = p['id']
                 is_owned = 1 if pid in my_player_ids else 0
@@ -598,7 +584,6 @@ if run_btn:
             for w_data in weeks_schedule:
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
-                
                 if gw_indices:
                     week_transfers = []
                     for d_idx in gw_indices:
@@ -616,7 +601,6 @@ if run_btn:
                     else:
                         prob += pulp.lpSum(week_captains) == 1
 
-            # APPLY PREVIOUS SOLUTION EXCLUSIONS (Integer Cuts)
             for prev_sol_roster in previous_solutions_constraints:
                 prob += pulp.lpSum([roster_vars[(pid, d)] for pid, d in prev_sol_roster]) <= len(prev_sol_roster) - 1
 
@@ -624,11 +608,9 @@ if run_btn:
             prob.solve(pulp.PULP_CBC_CMD(msg=0))
             
             if pulp.LpStatus[prob.status] != 'Optimal':
-                with option_tabs[opt_idx]:
-                    st.warning("No valid strategy found for this option.")
+                with option_tabs[opt_idx]: st.warning("No valid strategy found.")
                 continue
                 
-            # Store solution for next iteration
             current_sol_roster = []
             for d_idx in range(num_future_days):
                 for p in players_data:
@@ -636,17 +618,32 @@ if run_btn:
                         current_sol_roster.append((p['id'], d_idx))
             previous_solutions_constraints.append(current_sol_roster)
             
-            # RENDER RESULTS FOR THIS OPTION
             future_proj = pulp.value(prob.objective) / 10
-            total_proj = banked_points + future_proj
+            total_proj = banked_points_total + future_proj
+            if opt_idx == 0: best_total_score = total_proj
             
-            if opt_idx == 0: best_total_score = total_proj # Log best score
-            
+            # Breakdown calculation
+            gw_breakdown = {}
+            for w_data in weeks_schedule:
+                gw = w_data['gw']
+                gw_total = banked_points_by_gw.get(gw, 0.0)
+                for eid in w_data['events']:
+                    if eid in event_id_to_solver_idx:
+                        d_idx = event_id_to_solver_idx[eid]
+                        for p in players_data:
+                            if (p['id'], d_idx) in starter_vars and starter_vars[(p['id'], d_idx)].varValue > 0.5:
+                                pts = p['ep'] / 10.0
+                                if (p['id'], d_idx) in captain_vars and captain_vars[(p['id'], d_idx)].varValue > 0.5:
+                                    pts *= 2
+                                gw_total += pts
+                gw_breakdown[gw] = gw_total
+
             with option_tabs[opt_idx]:
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total Projected", f"{total_proj:.1f}")
-                c2.metric("Future Points", f"{future_proj:.1f}")
-                c3.metric("Banked Points", f"{banked_points:.1f}")
+                # Score Cards
+                cols = st.columns(len(gw_breakdown) + 1)
+                cols[0].metric("Total Score", f"{total_proj:.1f}")
+                for i, (gw, score) in enumerate(gw_breakdown.items()):
+                    cols[i+1].metric(f"GW{gw}", f"{score:.1f}")
                 
                 previous_roster_ids = set(my_player_ids)
                 
@@ -674,8 +671,6 @@ if run_btn:
                                             role = "Starter"
                                             if pick['multiplier'] == 0: role = "Bench"
                                             if pick['is_captain'] and pick['multiplier'] > 1: role = "CAPTAIN ⭐"
-                                            
-                                            # Actual Points
                                             actual_pts = get_player_score_for_date(pid, date_label)
                                             r_list.append({"Name": name, "Role": role, "Score": f"{actual_pts/10:.1f}"})
                                         st.dataframe(pd.DataFrame(r_list), use_container_width=True, hide_index=True)
@@ -722,7 +717,6 @@ if run_btn:
                                     df['sort'] = df['Role'].map(role_order)
                                     st.dataframe(df.sort_values('sort').drop('sort', axis=1), use_container_width=True, hide_index=True)
 
-        # Log Success
         log_simulation_end(log_id, 'SUCCESS', time.time()-start_time, result_summary=f"Score: {best_total_score:.1f}")
         
     except Exception as e:
