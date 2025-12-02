@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import pulp
 import time
-from datetime import datetime
+from datetime import datetime, date
 import math
 
 # --- CONFIGURATION ---
@@ -21,7 +21,6 @@ st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide", page_icon=
 # --- HELPER FUNCTIONS ---
 
 def fetch_json(url):
-    """Helper to fetch JSON data."""
     try:
         response = requests.get(url)
         response.raise_for_status()
@@ -31,18 +30,13 @@ def fetch_json(url):
 
 @st.cache_data(ttl=3600)
 def fetch_bootstrap():
-    """Fetches general game data (players, teams, events, phases)."""
     return fetch_json(f"{BASE_URL}/bootstrap-static/")
 
 @st.cache_data(ttl=3600)
 def fetch_fixtures():
-    """Fetches all fixtures."""
     return fetch_json(f"{BASE_URL}/fixtures/")
 
 def get_gameweek_event_range(bootstrap, gameweek):
-    """
-    Dynamically finds the start and stop event IDs for a given Gameweek.
-    """
     phases = bootstrap.get('phases', [])
     target_phase = None
     gw_name = f"Gameweek {gameweek}"
@@ -52,106 +46,83 @@ def get_gameweek_event_range(bootstrap, gameweek):
             target_phase = phase
             break
             
-    if not target_phase:
-        return []
+    if not target_phase: return []
+    return list(range(target_phase['start_event'], target_phase['stop_event'] + 1))
 
-    start = target_phase['start_event']
-    stop = target_phase['stop_event']
-    return list(range(start, stop + 1))
-
-def fetch_my_team(team_id, event_id):
-    """Fetches user's picks and bank."""
+def fetch_picks(team_id, event_id):
+    """Fetches picks/stats for a specific completed or active event."""
     url = f"{BASE_URL}/entry/{team_id}/event/{event_id}/picks/"
-    data = fetch_json(url)
-    
-    # Fallback to previous event if current hasn't started
-    if not data:
-        url = f"{BASE_URL}/entry/{team_id}/event/{event_id-1}/picks/"
-        data = fetch_json(url)
-        
-    return data
+    return fetch_json(url)
 
 def calculate_selling_price(purchase_price, now_cost):
-    """
-    Calculates selling price based on 50% sell-on fee logic.
-    """
-    if now_cost <= purchase_price:
-        return now_cost
-    
+    if now_cost <= purchase_price: return now_cost
     profit = now_cost - purchase_price
     fee = math.ceil(profit / 2)
     return now_cost - fee
 
-@st.cache_data(ttl=86400) # Cache player stats for 24 hours
+@st.cache_data(ttl=86400)
 def get_player_history_avg(player_id):
-    """
-    Calculates avg points for last 10 active games.
-    """
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
     
     history = data.get('history', [])
-    
-    # Exclude games from today (or future) to avoid partial stats
+    # Exclude today/future games to avoid partial stats
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
-    
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
     
-    # Injury Check: 0 mins in last 2 recorded games
     if len(history) >= 2:
         m1 = int(history[0].get('minutes', 0))
         m2 = int(history[1].get('minutes', 0))
-        if m1 == 0 and m2 == 0:
-            return None
+        if m1 == 0 and m2 == 0: return None
 
-    # Avg Calculation
     played_games = [g for g in history if int(g.get('minutes', 0)) > 0]
     last_10 = played_games[:10]
     
-    if not last_10:
-        return 0.0
-    
+    if not last_10: return 0.0
     total_points = sum(g['total_points'] for g in last_10)
     return total_points / len(last_10)
 
-# --- APP UI ---
+# --- MAIN APP UI ---
 
-st.title("🏀 NBA Fantasy Optimizer")
-st.markdown("Optimize your lineup and transfer strategy based on **Expected Points** (Last 10 Avg).")
+st.title("🏀 NBA Fantasy Optimizer (Live)")
+st.markdown("Optimize lineup and transfers accounting for **Mid-Week Progress**.")
 
-# Sidebar Inputs
+# Sidebar
 with st.sidebar:
     st.header("Settings")
-    team_id_input = st.number_input("Team ID (0 for 100m scratch)", value=DEFAULT_TEAM_ID, step=1)
+    team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
     gameweek_input = st.number_input("Gameweek", value=DEFAULT_GAMEWEEK, step=1)
-    safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0, step=1, help="Reserve this amount to avoid calculation errors.")
+    safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
+    
+    # SIMULATION MODE: Override "Today"
+    st.markdown("---")
+    st.caption("Simulation Mode")
+    use_sim_mode = st.checkbox("Simulate specific Game Day?")
+    sim_game_day = st.number_input("Current Game Day (1-7)", min_value=1, max_value=7, value=1, disabled=not use_sim_mode)
+    
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
 
 if run_btn:
-    status_text = st.empty()
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    # 1. Fetch Static Data
-    status_text.text("Fetching player database...")
+    # 1. Fetch Data
+    status_text.text("Fetching game data...")
     bootstrap = fetch_bootstrap()
-    if not bootstrap:
-        st.error("Failed to fetch static data.")
-        st.stop()
-        
+    if not bootstrap: st.stop()
+    
     elements = pd.DataFrame(bootstrap['elements'])
     teams = pd.DataFrame(bootstrap['teams'])
     element_types = pd.DataFrame(bootstrap['element_types'])
     
-    # Process Maps
     team_map = pd.Series(teams.name.values, index=teams.id).to_dict()
     if 'short_name' in teams.columns:
         team_short_map = pd.Series(teams.short_name.values, index=teams.id).to_dict()
     else:
         team_short_map = pd.Series(teams.name.str[:3].str.upper().values, index=teams.id).to_dict()
-
     pos_map = pd.Series(element_types.singular_name.values, index=element_types.id).to_dict()
     
     elements['team_name'] = elements['team'].map(team_map)
@@ -161,89 +132,118 @@ if run_btn:
     
     active_players = elements[elements['status'] != 'u'].copy()
     
-    # 2. Determine Gameweek Range
-    status_text.text(f"Determining schedule for Gameweek {gameweek_input}...")
+    # 2. Determine Schedule & Current Day
+    status_text.text(f"Analyzing schedule for Gameweek {gameweek_input}...")
     target_event_ids = get_gameweek_event_range(bootstrap, gameweek_input)
-    
-    if not target_event_ids:
-        st.error(f"Could not find schedule for 'Gameweek {gameweek_input}' in API data.")
-        st.stop()
-        
-    # FIX: Ensure event IDs are sorted to iterate chronologically
     target_event_ids.sort()
     
-    roster_source_event_id = min(target_event_ids) - 1
-    st.info(f"Optimization for Gameweek {gameweek_input} (Events {min(target_event_ids)}-{max(target_event_ids)})")
-    
-    # 3. Fetch User Team & Calculate Budget
-    my_player_ids = []
-    my_selling_prices = {}
-    
-    if team_id_input == 0:
-        st.success("✨ Generating optimal starting lineup from scratch (Budget: 100m)")
-        total_budget_safe = 1000 - safety_margin
-    else:
-        status_text.text(f"Fetching Roster for Team {team_id_input}...")
-        my_team_data = fetch_my_team(team_id_input, roster_source_event_id)
+    if not target_event_ids:
+        st.error(f"Gameweek {gameweek_input} not found.")
+        st.stop()
         
-        if not my_team_data:
-            st.error(f"Could not fetch data for Team ID {team_id_input}. Check ID or Gameweek.")
-            st.stop()
-            
-        picks = my_team_data['picks']
-        my_bank = my_team_data['entry_history']['bank']
-        
-        current_roster_liquidation_value = 0
-        
-        with st.expander("Current Roster Valuation", expanded=False):
-            roster_data = []
-            for p in picks:
-                pid = p['element']
-                my_player_ids.append(pid)
-                p_row = active_players.loc[active_players['id'] == pid]
-                
-                if p_row.empty: continue
-                
-                now_cost = p_row['now_cost'].values[0]
-                purchase_price = p.get('purchase_price', now_cost)
-                sell_price = calculate_selling_price(purchase_price, now_cost)
-                
-                my_selling_prices[pid] = sell_price
-                current_roster_liquidation_value += sell_price
-                
-                roster_data.append({
-                    "Player": p_row['web_name'].values[0],
-                    "Team": p_row['team_short'].values[0],
-                    "Selling Price": f"{sell_price/10}m"
-                })
-            st.dataframe(pd.DataFrame(roster_data), use_container_width=True)
-
-        total_budget_raw = current_roster_liquidation_value + my_bank
-        total_budget_safe = total_budget_raw - safety_margin
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Liquidation Value", f"{current_roster_liquidation_value/10}m")
-        col2.metric("Bank", f"{my_bank/10}m")
-        col3.metric("Optimizer Budget", f"{total_budget_safe/10}m")
-    
-    # 4. Fetch Fixtures & Map to Events
-    status_text.text("Fetching fixtures...")
     fixtures_data = fetch_fixtures()
     fixtures = pd.DataFrame(fixtures_data)
     gw_fixtures = fixtures[fixtures['event'].isin(target_event_ids)].copy()
     
-    # FIX: Group by Event ID (Game Day) instead of calendar date
-    # This prevents timezone splitting (e.g. UTC midnight split)
-    # We create a map: player_id -> set of event_indices (0, 1, 2...)
-    event_id_to_idx = {eid: i for i, eid in enumerate(target_event_ids)}
+    # Map Events to Dates
+    event_dates = {}
+    for eid in target_event_ids:
+        f = gw_fixtures[gw_fixtures['event'] == eid]
+        if not f.empty:
+            event_dates[eid] = f.iloc[0]['kickoff_time'][:10] # YYYY-MM-DD
+        else:
+            event_dates[eid] = "Unknown Date"
+
+    # Identify "Current" State Logic
     
-    # Pre-index players by team for speed
-    team_rosters = {}
-    for team_id in teams['id']:
-        team_rosters[team_id] = active_players[active_players['team'] == team_id]['id'].tolist()
+    if use_sim_mode:
+        # Simulation Logic: Split based on index (1-based day input)
+        # If sim_game_day is 3, it means we are ON Day 3. 
+        # Day 1 & 2 are Past. Day 3, 4... are Future/Active.
+        # Index split: Day 1 (index 0) is past? No, usually Day 1 is index 0.
+        # If current is Day 3 (index 2), then indices 0 and 1 are past.
+        split_idx = sim_game_day - 1
+        past_event_ids = target_event_ids[:split_idx]
+        future_event_ids = target_event_ids[split_idx:]
+        st.info(f"Simulating Mode: Starting optimization from Game Day {sim_game_day}.")
+    else:
+        # Real Date Logic
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
+        past_event_ids = [eid for eid in target_event_ids if event_dates[eid] < today_str]
+        future_event_ids = [eid for eid in target_event_ids if event_dates[eid] >= today_str]
+    
+    if not future_event_ids:
+        st.warning("This Gameweek has concluded. No optimization possible.")
+        st.stop()
         
-    # 5. Calculate Stats
-    status_text.text("Calculating player stats (Last 10 Avg)...")
+    if past_event_ids:
+        roster_source_event_id = past_event_ids[-1]
+        st.info(f"Mid-Week Optimization: {len(past_event_ids)} days complete. Using roster from {event_dates[roster_source_event_id]}.")
+    else:
+        roster_source_event_id = target_event_ids[0] - 1
+        st.info("Fresh Week Optimization: Starting from scratch/previous week.")
+
+    # 3. Analyze History (Banked Points & Used Transfers)
+    banked_points = 0.0
+    transfers_used = 0
+    past_day_stats = {} # Store stats for display
+    
+    if past_event_ids:
+        status_text.text("Calculating banked points from past days...")
+        for eid in past_event_ids:
+            data = fetch_picks(team_id_input, eid)
+            if data:
+                # API points are usually integers (e.g. 235 = 23.5)
+                raw_pts = data['entry_history']['points']
+                daily_pts = raw_pts / 10.0 # DIVIDE BY 10
+                
+                banked_points += daily_pts
+                transfers_used += data['entry_history']['event_transfers']
+                
+                # Store for UI
+                past_day_stats[eid] = {
+                    'score': daily_pts,
+                    'picks': data['picks']
+                }
+    
+    remaining_transfers = max(0, TRANSFERS_ALLOWED - transfers_used)
+    
+    # 4. Fetch Current Roster State
+    status_text.text(f"Fetching current roster state (Event {roster_source_event_id})...")
+    my_team_data = fetch_picks(team_id_input, roster_source_event_id)
+    
+    if not my_team_data and not past_event_ids:
+        my_team_data = fetch_picks(team_id_input, roster_source_event_id - 1)
+        
+    if not my_team_data:
+        st.error("Could not fetch initial roster. Check Team ID.")
+        st.stop()
+        
+    picks = my_team_data['picks']
+    my_bank = my_team_data['entry_history']['bank']
+    
+    my_player_ids = [p['element'] for p in picks]
+    my_selling_prices = {}
+    current_roster_liquidation_value = 0
+    
+    for p in picks:
+        pid = p['element']
+        now_cost = active_players.loc[active_players['id'] == pid, 'now_cost'].values[0]
+        purchase_price = p.get('purchase_price', now_cost)
+        sell_price = calculate_selling_price(purchase_price, now_cost)
+        my_selling_prices[pid] = sell_price
+        current_roster_liquidation_value += sell_price
+        
+    total_budget_safe = current_roster_liquidation_value + my_bank - safety_margin
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Banked Points", f"{banked_points:.1f}")
+    c2.metric("Transfers Left", remaining_transfers)
+    c3.metric("Budget Available", f"{total_budget_safe/10}m")
+    c4.metric("Days Remaining", len(future_event_ids))
+
+    # 5. Calculate Stats for Candidates
+    status_text.text("Calculating player stats...")
     
     available_players = active_players[
         (active_players['chance_of_playing_next_round'].isnull()) | 
@@ -252,110 +252,84 @@ if run_btn:
     
     top_candidates = available_players.sort_values('total_points', ascending=False).head(200)
     candidate_ids = set(top_candidates['id'].tolist())
-    for pid in my_player_ids:
-        candidate_ids.add(pid)
-        
+    for pid in my_player_ids: candidate_ids.add(pid)
+    
     players_to_fetch = active_players[active_players['id'].isin(candidate_ids)]
     player_eps = {}
     
     total_players = len(players_to_fetch)
     
     for i, (index, player) in enumerate(players_to_fetch.iterrows()):
-        if i % 10 == 0:
-            progress_bar.progress(int((i / total_players) * 90))
-            
+        if i % 20 == 0: progress_bar.progress(int((i / total_players) * 90))
+        
         pid = player['id']
         chance = player['chance_of_playing_next_round']
         is_doubtful = False
-        if pd.notna(chance) and chance <= 50:
-            is_doubtful = True
+        if pd.notna(chance) and chance <= 50: is_doubtful = True
             
         avg = get_player_history_avg(pid)
         
         if avg is None or is_doubtful:
-            if pid in my_player_ids:
-                avg = 0.0
-            else:
-                continue
-                
+            if pid in my_player_ids: avg = 0.0
+            else: continue
+        
         player_eps[pid] = avg
 
+    # 6. Optimization (FUTURE DAYS ONLY)
     progress_bar.progress(95)
-    status_text.text("Optimizing lineup...")
-
-    # 6. Optimization Model
-    prob = pulp.LpProblem("NBA_Fantasy", pulp.LpMaximize)
+    status_text.text("Optimizing future lineup...")
+    
+    prob = pulp.LpProblem("NBA_Fantasy_MidWeek", pulp.LpMaximize)
     
     players_data = []
-    # Only process players we have stats for
     for pid, ep in player_eps.items():
         p_row = elements[elements['id'] == pid].iloc[0]
         pos = p_row['position_name']
         simple_pos = "Back Court" if ("Guard" in pos or "Back" in pos) else "Front Court"
-        
-        if pid in my_selling_prices:
-            effective_cost = my_selling_prices[pid]
-        else:
-            effective_cost = p_row['now_cost']
+        effective_cost = my_selling_prices[pid] if pid in my_selling_prices else p_row['now_cost']
         
         players_data.append({
-            'id': pid,
-            'name': p_row['web_name'],
-            'full_name': p_row['full_name'],
-            'team_short': p_row['team_short'],
-            'cost': effective_cost,
-            'current_val': p_row['now_cost'],
-            'pos': simple_pos,
-            'team': p_row['team'],
-            'ep': ep
+            'id': pid, 'name': p_row['web_name'], 'team_short': p_row['team_short'],
+            'cost': effective_cost, 'current_val': p_row['now_cost'],
+            'pos': simple_pos, 'team': p_row['team'], 'ep': ep
         })
-    
-    # Build Player Schedule based on Event IDs
-    player_schedule = {p['id']: set() for p in players_data}
-    
-    # Iterate fixtures and map to 0-based index
-    for _, f in gw_fixtures.iterrows():
-        eid = f['event']
-        if eid in event_id_to_idx:
-            day_idx = event_id_to_idx[eid]
-            h_team = f['team_h']
-            a_team = f['team_a']
-            
-            # Find players in players_data that belong to these teams
-            # (Looping players_data is safe as it's filtered subset)
-            for p in players_data:
-                if p['team'] == h_team or p['team'] == a_team:
-                    player_schedule[p['id']].add(day_idx)
-
-    # Variables
+        
     roster_vars = {} 
     trans_in_vars = {}
     starter_vars = {} 
     captain_vars = {}
     
-    # Use index 0 to N for days
-    num_days = len(target_event_ids)
+    player_schedule = {p['id']: set() for p in players_data}
+    event_id_to_solver_idx = {eid: i for i, eid in enumerate(future_event_ids)}
     
-    for d_idx in range(num_days):
+    for _, f in gw_fixtures.iterrows():
+        eid = f['event']
+        if eid in event_id_to_solver_idx:
+            day_idx = event_id_to_solver_idx[eid]
+            for p in players_data:
+                if p['team'] == f['team_h'] or p['team'] == f['team_a']:
+                    player_schedule[p['id']].add(day_idx)
+
+    num_future_days = len(future_event_ids)
+    
+    for d_idx in range(num_future_days):
         for p in players_data:
             pid = p['id']
             roster_vars[(pid, d_idx)] = pulp.LpVariable(f"Roster_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
-            if d_idx > 0:
+            if d_idx >= 0: 
                 trans_in_vars[(pid, d_idx)] = pulp.LpVariable(f"In_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
-            
             if d_idx in player_schedule[pid]:
                 starter_vars[(pid, d_idx)] = pulp.LpVariable(f"Start_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
                 captain_vars[(pid, d_idx)] = pulp.LpVariable(f"Capt_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
 
-    # Constraints
     for p in players_data:
-        if p['id'] in my_player_ids:
-            prob += roster_vars[(p['id'], 0)] == 1
-        else:
-            if len([x for x in my_player_ids if x in player_eps]) == 10:
-                prob += roster_vars[(p['id'], 0)] == 0
+        pid = p['id']
+        is_owned = 1 if pid in my_player_ids else 0
+        prob += trans_in_vars[(pid, 0)] >= roster_vars[(pid, 0)] - is_owned
+        for d_idx in range(1, num_future_days):
+            prob += trans_in_vars[(pid, d_idx)] >= roster_vars[(pid, d_idx)] - roster_vars[(pid, d_idx-1)]
 
-    prob += pulp.lpSum(trans_in_vars.values()) <= TRANSFERS_ALLOWED
+    prob += pulp.lpSum(trans_in_vars.values()) <= remaining_transfers
     prob += pulp.lpSum(captain_vars.values()) == 1
     
     teams_list = elements['team'].unique()
@@ -364,10 +338,8 @@ if run_btn:
     
     total_obj = 0
     
-    for d_idx in range(num_days):
-        current_roster = [roster_vars[(p['id'], d_idx)] for p in players_data]
-        
-        prob += pulp.lpSum(current_roster) == ROSTER_SIZE
+    for d_idx in range(num_future_days):
+        prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in players_data]) == ROSTER_SIZE
         prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] * p['cost'] for p in players_data]) <= total_budget_safe
         prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in bc_players]) == 5
         prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in fc_players]) == 5
@@ -376,15 +348,9 @@ if run_btn:
             t_players = [p for p in players_data if p['team'] == t]
             prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in t_players]) <= MAX_PLAYERS_PER_TEAM
 
-        if d_idx > 0:
-            for p in players_data:
-                pid = p['id']
-                prob += trans_in_vars[(pid, d_idx)] >= roster_vars[(pid, d_idx)] - roster_vars[(pid, d_idx-1)]
-
         day_starters = [starter_vars[(p['id'], d_idx)] for p in players_data if (p['id'], d_idx) in starter_vars]
         if day_starters:
             prob += pulp.lpSum(day_starters) <= 5
-            
             day_bc = [starter_vars[(p['id'], d_idx)] for p in bc_players if (p['id'], d_idx) in starter_vars]
             day_fc = [starter_vars[(p['id'], d_idx)] for p in fc_players if (p['id'], d_idx) in starter_vars]
             prob += pulp.lpSum(day_bc) <= 3
@@ -404,77 +370,121 @@ if run_btn:
     progress_bar.progress(100)
     status_text.text("Done!")
     
-    # 7. Results
     if pulp.LpStatus[prob.status] != 'Optimal':
-        st.error("Optimization failed. Your current roster might violate strict budget or team limits.")
+        st.error("Optimization failed. Constraints might be too tight given remaining transfers/budget.")
     else:
-        proj_score = pulp.value(prob.objective) / 10
-        st.success(f"Optimization Successful! Projected Score: {proj_score:.1f}")
+        future_proj = pulp.value(prob.objective) / 10
+        total_proj = banked_points + future_proj
+        st.success(f"Projected Total: {total_proj:.1f} pts ({banked_points:.1f} Banked + {future_proj:.1f} Future)")
         
-        tabs = st.tabs([f"Day {i+1}" for i in range(num_days)])
-        previous_roster = set()
+        # Tabs for ALL days (Past + Future)
+        day_labels = [f"Day {i+1}" for i in range(len(target_event_ids))]
+        tabs = st.tabs(day_labels)
         
-        for d_idx in range(num_days):
-            with tabs[d_idx]:
-                # Get Date for Caption from gw_fixtures based on event_id
-                current_event_id = target_event_ids[d_idx]
-                day_matches = gw_fixtures[gw_fixtures['event'] == current_event_id]
-                if not day_matches.empty:
-                    # Parse first game time for date display
-                    date_str = day_matches.iloc[0]['kickoff_time'][:10]
-                    st.caption(f"Date: {date_str} (Event {current_event_id})")
-                
-                roster_today = []
-                roster_ids = set()
-                for p in players_data:
-                    if roster_vars[(p['id'], d_idx)].varValue > 0.5:
-                        roster_today.append(p)
-                        roster_ids.add(p['id'])
-                
-                if d_idx > 0:
-                    trans_in = roster_ids - previous_roster
-                    trans_out = previous_roster - roster_ids
+        previous_roster_ids = set(my_player_ids)
+        
+        for i, eid in enumerate(target_event_ids):
+            with tabs[i]:
+                # --- PAST DAY LOGIC ---
+                if eid in past_event_ids:
+                    st.caption(f"Status: COMPLETED | Date: {event_dates[eid]}")
+                    
+                    if eid in past_day_stats:
+                        stats = past_day_stats[eid]
+                        st.metric("Daily Score", f"{stats['score']:.1f}")
+                        
+                        # Show players who played (simplified)
+                        roster_list = []
+                        for pick in stats['picks']:
+                            pid = pick['element']
+                            p_row = active_players.loc[active_players['id'] == pid]
+                            
+                            if not p_row.empty:
+                                name = p_row['web_name'].values[0]
+                                team_short = p_row['team_short'].values[0]
+                                val = p_row['now_cost'].values[0] / 10
+                            else:
+                                name = "Unknown"
+                                team_short = "-"
+                                val = 0.0
+                            
+                            # Role & Points
+                            is_capt = pick['is_captain']
+                            mult = pick['multiplier']
+                            pts = pick.get('points', 0) # Raw points
+                            
+                            role = "Starter"
+                            if mult == 0: role = "Bench"
+                            if is_capt: role = "CAPTAIN ⭐"
+                            
+                            roster_list.append({
+                                "Name": name, 
+                                "Team": team_short,
+                                "Value": f"{val}m",
+                                "Role": role,
+                                "Score": pts
+                            })
+                        
+                        st.dataframe(pd.DataFrame(roster_list), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No data available for this day.")
+                        
+                # --- FUTURE DAY LOGIC ---
+                elif eid in future_event_ids:
+                    st.caption(f"Status: UPCOMING | Date: {event_dates[eid]}")
+                    
+                    # Get solver index (0 to N for future days)
+                    d_idx = event_id_to_solver_idx[eid]
+                    
+                    roster_today = []
+                    roster_ids = set()
+                    for p in players_data:
+                        if roster_vars[(p['id'], d_idx)].varValue > 0.5:
+                            roster_today.append(p)
+                            roster_ids.add(p['id'])
+                    
+                    trans_in = roster_ids - previous_roster_ids
+                    trans_out = previous_roster_ids - roster_ids
+                    
                     if trans_in:
                         st.subheader("Transfers")
                         c1, c2 = st.columns(2)
                         with c1:
                             for pid in trans_out:
-                                p_obj = next(x for x in players_data if x['id'] == pid)
-                                st.error(f"OUT: {p_obj['name']} (Sell: {p_obj['cost']/10}m)")
+                                p_obj = next((x for x in players_data if x['id'] == pid), None)
+                                name = p_obj['name'] if p_obj else "Unknown"
+                                cost = p_obj['cost']/10 if p_obj else "?"
+                                st.error(f"OUT: {name} (Sell: {cost}m)")
                         with c2:
                             for pid in trans_in:
                                 p_obj = next(x for x in players_data if x['id'] == pid)
                                 st.success(f"IN: {p_obj['name']} (Buy: {p_obj['cost']/10}m)")
-                
-                previous_roster = roster_ids
-                
-                lineup_data = []
-                for p in roster_today:
-                    pid = p['id']
-                    status = "Bench"
-                    points = 0.0
                     
-                    if (pid, d_idx) in starter_vars and starter_vars[(pid, d_idx)].varValue > 0.5:
-                        status = "Starter"
-                        points = p['ep'] / 10
-                        if (pid, d_idx) in captain_vars and captain_vars[(pid, d_idx)].varValue > 0.5:
-                            status = "CAPTAIN ⭐"
-                            points *= 2
-                    elif d_idx not in player_schedule[pid]:
-                        status = "No Game"
+                    previous_roster_ids = roster_ids
                     
-                    lineup_data.append({
-                        "Name": p['name'],
-                        "Team": p['team_short'],
-                        "Pos": p['pos'],
-                        "Value": f"{p['current_val']/10}m",
-                        "Role": status,
-                        "Exp Pts": f"{points:.1f}"
-                    })
-                
-                df = pd.DataFrame(lineup_data)
-                role_order = {"CAPTAIN ⭐": 0, "Starter": 1, "Bench": 2, "No Game": 3}
-                df['sort_key'] = df['Role'].map(role_order)
-                df = df.sort_values('sort_key').drop('sort_key', axis=1)
-                
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                    lineup_data = []
+                    for p in roster_today:
+                        pid = p['id']
+                        status = "Bench"
+                        points = 0.0
+                        
+                        if (pid, d_idx) in starter_vars and starter_vars[(pid, d_idx)].varValue > 0.5:
+                            status = "Starter"
+                            points = p['ep'] / 10
+                            if (pid, d_idx) in captain_vars and captain_vars[(pid, d_idx)].varValue > 0.5:
+                                status = "CAPTAIN ⭐"
+                                points *= 2
+                        elif d_idx not in player_schedule[pid]:
+                            status = "No Game"
+                        
+                        lineup_data.append({
+                            "Name": p['name'], "Team": p['team_short'],
+                            "Pos": p['pos'], "Value": f"{p['current_val']/10}m",
+                            "Role": status, "Exp Pts": f"{points:.1f}"
+                        })
+                    
+                    df = pd.DataFrame(lineup_data)
+                    role_order = {"CAPTAIN ⭐": 0, "Starter": 1, "Bench": 2, "No Game": 3}
+                    df['sort_key'] = df['Role'].map(role_order)
+                    df = df.sort_values('sort_key').drop('sort_key', axis=1)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
