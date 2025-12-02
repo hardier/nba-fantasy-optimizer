@@ -36,6 +36,12 @@ def fetch_bootstrap():
 def fetch_fixtures():
     return fetch_json(f"{BASE_URL}/fixtures/")
 
+@st.cache_data(ttl=86400)
+def fetch_player_detail(player_id):
+    """Fetches full player detail including history."""
+    url = f"{BASE_URL}/element-summary/{player_id}/"
+    return fetch_json(url)
+
 def get_gameweek_event_range(bootstrap, gameweek):
     """Returns list of event IDs for a specific gameweek."""
     phases = bootstrap.get('phases', [])
@@ -61,14 +67,27 @@ def calculate_selling_price(purchase_price, now_cost):
     fee = math.ceil(profit / 2)
     return now_cost - fee
 
-@st.cache_data(ttl=86400)
+def get_player_score_for_date(player_id, target_date):
+    """
+    Finds the points scored by a player on a specific date string (YYYY-MM-DD).
+    Returns raw points (integer).
+    """
+    data = fetch_player_detail(player_id)
+    if not data: return 0
+    
+    history = data.get('history', [])
+    for h in history:
+        # kick_off_time format: "2025-12-01T00:00:00Z"
+        if h['kickoff_time'].startswith(target_date):
+            return h['total_points']
+    return 0
+
 def get_player_history_avg(player_id):
     """
     Calculates avg points for last 5 active games.
     Active means total_points > 0.
     """
-    url = f"{BASE_URL}/element-summary/{player_id}/"
-    data = fetch_json(url)
+    data = fetch_player_detail(player_id)
     if not data: return 0.0
     
     history = data.get('history', [])
@@ -76,7 +95,7 @@ def get_player_history_avg(player_id):
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
     
-    # Injury Check: Still assume injured if 0 mins in last 2 *recorded* games
+    # Injury Check
     if len(history) >= 2:
         m1 = int(history[0].get('minutes', 0))
         m2 = int(history[1].get('minutes', 0))
@@ -84,8 +103,6 @@ def get_player_history_avg(player_id):
 
     # Filter: Active = Points > 0
     played_games = [g for g in history if g.get('total_points', 0) > 0]
-    
-    # Take last 5
     last_5 = played_games[:5]
     
     if not last_5: return 0.0
@@ -234,7 +251,7 @@ if run_btn:
                 gw_num = event_to_gw_map.get(eid)
                 if gw_num:
                     for p in data['picks']:
-                        # Only mark captain used if multiplier > 1
+                        # Check multiplier > 1 for actual captain usage
                         if p['is_captain'] and p['multiplier'] > 1:
                             captain_used_map[gw_num] = True
                             break
@@ -395,7 +412,6 @@ if run_btn:
     for w_data in weeks_schedule:
         gw_num = w_data['gw']
         gw_events = w_data['events']
-        # FIX: Use the unified variable name defined earlier
         gw_indices = [event_id_to_solver_idx[eid] for eid in gw_events if eid in event_id_to_solver_idx]
         
         if gw_indices:
@@ -441,7 +457,9 @@ if run_btn:
                 for i, eid in enumerate(gw_events):
                     with day_tabs[i]:
                         if eid in past_event_ids:
-                            st.caption(f"Status: COMPLETED | Date: {event_dates.get(eid, '?')}")
+                            date_label = event_dates.get(eid, '?')
+                            st.caption(f"Status: COMPLETED | Date: {date_label}")
+                            
                             if eid in past_day_stats:
                                 stats = past_day_stats[eid]
                                 st.metric("Daily Score", f"{stats['score']:.1f}")
@@ -451,18 +469,23 @@ if run_btn:
                                     p_row = active_players.loc[active_players['id'] == pid]
                                     name = p_row['web_name'].values[0] if not p_row.empty else "Unknown"
                                     team_short = p_row['team_short'].values[0] if not p_row.empty else "-"
+                                    
                                     role = "Starter"
                                     if pick['multiplier'] == 0: role = "Bench"
-                                    # FIX: Check multiplier > 1 for actual captain usage
                                     if pick['is_captain'] and pick['multiplier'] > 1: role = "CAPTAIN ⭐"
-                                    # FIX: Divide points by 10 for table
-                                    pts = pick.get('points', 0) / 10.0
-                                    roster_list.append({"Name": name, "Team": team_short, "Role": role, "Score": f"{pts:.1f}"})
+                                    
+                                    # Lookup actual points for this date
+                                    actual_pts = get_player_score_for_date(pid, date_label)
+                                    pts_display = actual_pts / 10.0
+                                    
+                                    roster_list.append({
+                                        "Name": name, "Team": team_short, 
+                                        "Role": role, "Score": f"{pts_display:.1f}"
+                                    })
                                 st.dataframe(pd.DataFrame(roster_list), use_container_width=True, hide_index=True)
                             else: st.info("No data.")
                         
                         elif eid in future_event_ids:
-                            # FIX: Use consistent variable name
                             d_idx = event_id_to_solver_idx[eid]
                             st.caption(f"Status: UPCOMING | Date: {event_dates.get(eid, '?')}")
                             
