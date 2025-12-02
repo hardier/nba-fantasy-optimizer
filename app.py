@@ -174,7 +174,7 @@ if run_btn:
     if team_id_input == 0:
         st.success("✨ Generating optimal starting lineup from scratch (Budget: 100m)")
         # 100m = 1000 units
-        total_budget_safe = 1000
+        total_budget_safe = 1000 - safety_margin
     else:
         status_text.text(f"Fetching Roster for Team {team_id_input}...")
         my_team_data = fetch_my_team(team_id_input, roster_source_event_id)
@@ -231,8 +231,17 @@ if run_btn:
     # 5. Calculate Stats
     status_text.text("Calculating player stats (Last 10 Avg)...")
     
-    top_candidates = active_players.sort_values('total_points', ascending=False).head(200)
+    # FILTER: Filter out players with chance_of_playing_next_round <= 50% for TRANSFERS
+    # We allow them if they are already in the team (to calculate selling), but handle them in loop.
+    available_players = active_players[
+        (active_players['chance_of_playing_next_round'].isnull()) | 
+        (active_players['chance_of_playing_next_round'] > 50)
+    ]
+    
+    top_candidates = available_players.sort_values('total_points', ascending=False).head(200)
     candidate_ids = set(top_candidates['id'].tolist())
+    
+    # Always include current team in fetch list
     for pid in my_player_ids:
         candidate_ids.add(pid)
         
@@ -246,14 +255,21 @@ if run_btn:
             progress_bar.progress(int((i / total_players) * 90))
             
         pid = player['id']
+        
+        # Check Explicit Injury (chance <= 50)
+        chance = player['chance_of_playing_next_round']
+        is_doubtful = False
+        if pd.notna(chance) and chance <= 50:
+            is_doubtful = True
+            
         avg = get_player_history_avg(pid)
         
-        # Keep owned players even if injured (0 pts) to prevent crash
-        if avg is None:
+        # Logic: If injured (via history OR status), effectively 0 pts
+        if avg is None or is_doubtful:
             if pid in my_player_ids:
-                avg = 0.0
+                avg = 0.0 # Keep owned but zero score
             else:
-                continue
+                continue # Skip buying
                 
         player_eps[pid] = avg
 
@@ -309,14 +325,12 @@ if run_btn:
                 captain_vars[(pid, d_idx)] = pulp.LpVariable(f"Capt_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
 
     # Constraints
-    # Day 1 Roster Enforcement (Only if not scratch start)
-    if team_id_input != 0:
-        for p in players_data:
-            if p['id'] in my_player_ids:
-                prob += roster_vars[(p['id'], 0)] == 1
-            else:
-                if len([x for x in my_player_ids if x in player_eps]) == 10:
-                    prob += roster_vars[(p['id'], 0)] == 0
+    for p in players_data:
+        if p['id'] in my_player_ids:
+            prob += roster_vars[(p['id'], 0)] == 1
+        else:
+            if len([x for x in my_player_ids if x in player_eps]) == 10:
+                prob += roster_vars[(p['id'], 0)] == 0
 
     prob += pulp.lpSum(trans_in_vars.values()) <= TRANSFERS_ALLOWED
     prob += pulp.lpSum(captain_vars.values()) == 1
@@ -374,7 +388,6 @@ if run_btn:
         proj_score = pulp.value(prob.objective) / 10
         st.success(f"Optimization Successful! Projected Score: {proj_score:.1f}")
         
-        # Use Day 1, Day 2... for tabs instead of exact dates
         tabs = st.tabs([f"Day {i+1}" for i in range(len(game_days))])
         previous_roster = set()
         
@@ -398,7 +411,6 @@ if run_btn:
                         with c1:
                             for pid in trans_out:
                                 p_obj = next(x for x in players_data if x['id'] == pid)
-                                # Show actual sell value (which frees up budget)
                                 st.error(f"OUT: {p_obj['name']} (Sell: {p_obj['cost']/10}m)")
                         with c2:
                             for pid in trans_in:
