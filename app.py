@@ -45,12 +45,28 @@ def get_firestore_db():
         return None
 
 def get_remote_ip():
+    """
+    Attempts to get the client IP address.
+    1. Tries X-Forwarded-For (Hosted/Cloud users).
+    2. Fallback to ipify (Local users running script).
+    """
+    # 1. Try Headers (Standard for Cloud/Hosted)
     try:
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if "X-Forwarded-For" in headers:
-                return headers["X-Forwarded-For"].split(",")[0]
-    except Exception: pass
+                return headers["X-Forwarded-For"].split(",")[0].strip()
+    except Exception: 
+        pass
+
+    # 2. Fallback: External Service (For Localhost/LAN usage to get Network Public IP)
+    try:
+        response = requests.get("https://api.ipify.org", timeout=2)
+        if response.status_code == 200:
+            return response.text
+    except Exception:
+        pass
+    
     return "Unknown/Local"
 
 def get_ip_location(ip):
@@ -289,29 +305,41 @@ with st.sidebar:
     
     st.markdown("---")
     st.caption("Simulation Mode")
-    use_sim_mode = st.checkbox("Simulate specific Game Day?")
-    sim_game_day = st.number_input("Current Game Day of start Gameweek (1-7)", min_value=1, max_value=7, value=1, disabled=not use_sim_mode)
+    
+    # --- AUTO-DETECT GAME DAY ---
+    default_sim = False
+    default_day = 1
+    
+    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    gw_events = get_gameweek_event_range(bootstrap, gameweek_input)
+    
+    if gw_events:
+        gw_events.sort()
+        fixtures_data = fetch_fixtures()
+        if fixtures_data:
+            fx = pd.DataFrame(fixtures_data)
+            subset = fx[fx['event'].isin(gw_events)]
+            for i, eid in enumerate(gw_events):
+                ev_games = subset[subset['event'] == eid]
+                if not ev_games.empty:
+                    e_date = ev_games.iloc[0]['kickoff_time'][:10]
+                    if e_date == today_str:
+                        day_num = i + 1
+                        if day_num >= 2:
+                            default_sim = True
+                            default_day = day_num
+                        break
+
+    use_sim_mode = st.checkbox("Simulate specific Game Day?", value=default_sim)
+    sim_game_day = st.number_input("Current Game Day of start Gameweek (1-7)", min_value=1, max_value=7, value=default_day, disabled=not use_sim_mode)
     
     st.markdown("---")
     
     # --- PRE-CALCULATE ROSTER FOR MANUAL DROP SELECTOR ---
-    # We need to know the roster to populate the dropdown BEFORE run is clicked.
-    
-    # 1. Get GW Events
-    gw_events = get_gameweek_event_range(bootstrap, gameweek_input)
-    gw_events.sort()
-    
-    # 2. Determine "Today" (Simulated or Real)
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
-    
-    # Determine Roster Source Logic (simplified for UI selector)
     roster_source_eid = None
     if gw_events:
-        # Default to start of week - 1
         roster_source_eid = gw_events[0] - 1
-        
-        # Refine if simulation/mid-week
-        fixtures_data = fetch_fixtures() # Use cached
+        fixtures_data = fetch_fixtures() 
         if fixtures_data:
             fixtures = pd.DataFrame(fixtures_data)
             gw_fixtures = fixtures[fixtures['event'].isin(gw_events)].copy()
@@ -329,11 +357,9 @@ with st.sidebar:
                 past_eids = [eid for eid in gw_events if event_dates.get(eid, "9999") < today_str]
                 if past_eids: roster_source_eid = past_eids[-1]
 
-    # 3. Fetch Roster for Dropdown
-    current_roster_names = {} # {name: id}
+    current_roster_names = {}
     if roster_source_eid:
         team_data = fetch_picks(team_id_input, event_id=roster_source_eid)
-        # Fallback logic handled in fetch_picks wrapper normally, but here manual:
         if not team_data:
              team_data = fetch_picks(team_id_input, roster_source_eid - 1)
         
@@ -345,7 +371,6 @@ with st.sidebar:
                     name = f"{p_row['web_name'].values[0]} ({p_row['team_short'].values[0]})"
                     current_roster_names[name] = pid
 
-    # 4. Render Dropdown
     forced_drop_names = st.multiselect(
         "Force Transfer Out (Start of Sim):",
         options=list(current_roster_names.keys()),
@@ -385,8 +410,7 @@ if run_btn:
         
         if not all_target_event_ids: raise Exception("No valid events found")
 
-        # Fixtures already fetched for sidebar check, reusing logic to map all
-        fixtures_data = fetch_fixtures() # Cached
+        fixtures_data = fetch_fixtures()
         fixtures = pd.DataFrame(fixtures_data)
         gw_fixtures = fixtures[fixtures['event'].isin(all_target_event_ids)].copy()
         
@@ -414,7 +438,6 @@ if run_btn:
         if not future_event_ids: raise Exception("All selected gameweeks have concluded")
 
         event_id_to_solver_idx = {eid: i for i, eid in enumerate(future_event_ids)}
-        # Roster source determined dynamically
         roster_source_event_id = past_event_ids[-1] if past_event_ids else week1_events[0] - 1
 
         # 4. Analyze History
@@ -452,7 +475,7 @@ if run_btn:
             limit = max(0, TRANSFERS_ALLOWED - transfers_used_w1) if i == 0 else TRANSFERS_ALLOWED
             transfers_limit_map[gw_num] = limit
 
-        # 5. Fetch Initial Roster (For Solver)
+        # 5. Fetch Initial Roster
         status_text.text("Fetching initial roster...")
         my_team_data = fetch_picks(team_id_input, roster_source_event_id)
         if not my_team_data and not past_event_ids:
@@ -503,15 +526,10 @@ if run_btn:
             chance = player['chance_of_playing_next_round']
             is_doubtful = False
             
-            # Updated Logic: Only mark as doubtful if strictly < 50 (Keep 50/75/100)
             if pd.notna(chance) and chance < 50: 
                 is_doubtful = True
                 if pid in my_player_ids:
                     owned_injured_pids.append(pid)
-            
-            # For Force Sell option, we might still want to treat <= 50 as sellable if user wants strict health
-            # But to keep consistent with "remove < 50", we stick to < 50 here.
-            # If you want to force sell 50s, we can revert this specific check for owned_injured_pids.
             
             avg = get_player_history_avg(pid)
             if avg is None or is_doubtful:
