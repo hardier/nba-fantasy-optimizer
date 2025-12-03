@@ -486,7 +486,7 @@ if run_btn:
         status_text.text("Calculating player stats...")
         available_players = active_players[
             (active_players['chance_of_playing_next_round'].isnull()) | 
-            (active_players['chance_of_playing_next_round'] > 50)
+            (active_players['chance_of_playing_next_round'] >= 50)
         ]
         top_candidates = available_players.sort_values('total_points', ascending=False).head(200)
         candidate_ids = set(top_candidates['id'].tolist())
@@ -495,12 +495,23 @@ if run_btn:
         players_to_fetch = active_players[active_players['id'].isin(candidate_ids)]
         player_eps = {}
         
+        owned_injured_pids = [] # Track injured players we own for forced selling
+        
         for i, (index, player) in enumerate(players_to_fetch.iterrows()):
             if i % 20 == 0: progress_bar.progress(int((i / len(players_to_fetch)) * 90))
             pid = player['id']
             chance = player['chance_of_playing_next_round']
             is_doubtful = False
-            if pd.notna(chance) and chance <= 50: is_doubtful = True
+            
+            # Updated Logic: Only mark as doubtful if strictly < 50 (Keep 50/75/100)
+            if pd.notna(chance) and chance < 50: 
+                is_doubtful = True
+                if pid in my_player_ids:
+                    owned_injured_pids.append(pid)
+            
+            # For Force Sell option, we might still want to treat <= 50 as sellable if user wants strict health
+            # But to keep consistent with "remove < 50", we stick to < 50 here.
+            # If you want to force sell 50s, we can revert this specific check for owned_injured_pids.
             
             avg = get_player_history_avg(pid)
             if avg is None or is_doubtful:
@@ -571,11 +582,8 @@ if run_btn:
                 for d_idx in range(1, num_future_days):
                     prob += trans_in_vars[(pid, d_idx)] >= roster_vars[(pid, d_idx)] - roster_vars[(pid, d_idx-1)]
 
-            # --- FORCE DROP CONSTRAINT ---
+            # --- FORCE DROP CONSTRAINT (Manual) ---
             for pid in forced_drop_ids:
-                # Player must NOT be in roster on Day 0 (effective immediate transfer out)
-                # Only need to constrain day 0, continuity handles the rest unless bought back later (unlikely if optimized)
-                # But to be safe, prevent them from being in the roster at all for this sim
                 for d_idx in range(num_future_days):
                     if (pid, d_idx) in roster_vars:
                          prob += roster_vars[(pid, d_idx)] == 0
@@ -698,11 +706,12 @@ if run_btn:
                                             pid = pick['element']
                                             p_row = active_players.loc[active_players['id'] == pid]
                                             name = p_row['web_name'].values[0] if not p_row.empty else "Unknown"
+                                            team_short = p_row['team_short'].values[0] if not p_row.empty else "-"
                                             role = "Starter"
                                             if pick['multiplier'] == 0: role = "Bench"
                                             if pick['is_captain'] and pick['multiplier'] > 1: role = "CAPTAIN ⭐"
                                             actual_pts = get_player_score_for_date(pid, date_label)
-                                            r_list.append({"Name": name, "Role": role, "Score": f"{actual_pts/10:.1f}"})
+                                            r_list.append({"Name": name, "Team": team_short, "Role": role, "Score": f"{actual_pts/10:.1f}"})
                                         st.dataframe(pd.DataFrame(r_list), use_container_width=True, hide_index=True)
                                     else: st.info("No data.")
                                 
