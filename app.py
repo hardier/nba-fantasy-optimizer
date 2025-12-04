@@ -63,37 +63,26 @@ def get_remote_ip():
              headers = st.request.headers
         
         if headers:
-            # Priority 1: X-Forwarded-For (Standard for Load Balancers)
-            # Format: "client_ip, proxy1, proxy2" -> we want the first one
             if "X-Forwarded-For" in headers:
                 ip = headers["X-Forwarded-For"].split(",")[0].strip()
-            # Priority 2: X-Real-IP (Nginx/Render/Heroku specific)
             elif "X-Real-IP" in headers:
                 ip = headers["X-Real-IP"].strip()
     except Exception: 
         pass
 
     # 2. Validate & Fallback
-    # If we didn't get an IP, or we got a private/internal one (10.x, 192.168.x, 127.x), 
-    # try fetching the network's public IP via external service.
-    
     is_private = False
     if not ip or ip in ["Unknown/Local", "localhost", "::1"]:
         is_private = True
     elif ip.startswith("127.") or ip.startswith("10.") or ip.startswith("192.168."):
         is_private = True
     elif ip.startswith("172."):
-        # 172.16.0.0 - 172.31.255.255 are private
         parts = ip.split(".")
         if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
             is_private = True
 
     if is_private:
         try:
-            # This tells us the Public IP of the SERVER running the script.
-            # On Localhost, this is YOUR IP. On Cloud, this is the CLOUD SERVER'S IP.
-            # This is useful for debugging connectivity but might not be the User's IP in a Cloud setting.
-            # However, if headers failed, it's the best we have to identify the instance location.
             response = requests.get("https://api.ipify.org", timeout=2)
             if response.status_code == 200:
                 return response.text
@@ -133,13 +122,15 @@ def init_local_db():
             status TEXT,
             duration_sec REAL,
             error_msg TEXT,
-            result_summary TEXT
+            result_summary TEXT,
+            transfers TEXT
         )
     ''')
     c.execute("PRAGMA table_info(logs)")
     cols = [info[1] for info in c.fetchall()]
     if 'ip_address' not in cols: c.execute("ALTER TABLE logs ADD COLUMN ip_address TEXT")
     if 'location' not in cols: c.execute("ALTER TABLE logs ADD COLUMN location TEXT")
+    if 'transfers' not in cols: c.execute("ALTER TABLE logs ADD COLUMN transfers TEXT")
     conn.commit()
     conn.close()
 
@@ -167,20 +158,21 @@ def log_simulation_start(team_id, gw, weeks):
         conn.close()
         return log_id
 
-def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=None):
+def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=None, transfers=None):
     db = get_firestore_db()
     if db:
         if log_id:
             db.collection("logs").document(str(log_id)).update({
                 "status": status, "duration_sec": duration,
                 "error_msg": error_msg if error_msg else "",
-                "result_summary": result_summary if result_summary else ""
+                "result_summary": result_summary if result_summary else "",
+                "transfers": transfers if transfers else ""
             })
     else:
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
-        c.execute("UPDATE logs SET status=?, duration_sec=?, error_msg=?, result_summary=? WHERE id=?",
-            (status, duration, error_msg, result_summary, log_id))
+        c.execute("UPDATE logs SET status=?, duration_sec=?, error_msg=?, result_summary=?, transfers=? WHERE id=?",
+            (status, duration, error_msg, result_summary, transfers, log_id))
         conn.commit()
         conn.close()
 
@@ -452,10 +444,13 @@ if run_btn:
     start_time = time.time()
     log_id = log_simulation_start(team_id_input, gameweek_input, weeks_to_optimize)
     best_total_score = 0.0
+    best_option_transfers = [] # To store transfer log
     
     try:
         progress_bar = st.progress(0)
         status_text = st.empty()
+        
+        # Data already fetched above (bootstrap, active_players), reusing...
         
         # 2. Determine Schedule
         status_text.text(f"Building schedule for {weeks_to_optimize} weeks...")
@@ -583,16 +578,18 @@ if run_btn:
         players_to_fetch = active_players[active_players['id'].isin(candidate_ids)]
         player_eps = {}
         
-        owned_injured_pids = []
+        owned_injured_pids = [] # Track injured players we own for forced selling
         
         for i, (index, player) in enumerate(players_to_fetch.iterrows()):
             if i % 20 == 0: progress_bar.progress(int((i / len(players_to_fetch)) * 90))
             pid = player['id']
             chance = player['chance_of_playing_next_round']
             is_doubtful = False
+            
             if pd.notna(chance) and chance < 50: 
                 is_doubtful = True
-                if pid in my_player_ids: owned_injured_pids.append(pid)
+                if pid in my_player_ids:
+                    owned_injured_pids.append(pid)
             
             if pid in forced_keep_ids or pid in forced_add_ids: is_doubtful = False
             avg = get_player_history_avg(pid)
@@ -613,13 +610,14 @@ if run_btn:
             pos = p_row['position_name']
             simple_pos = "Back Court" if ("Guard" in pos or "Back" in pos) else "Front Court"
             effective_cost = my_selling_prices[pid] if pid in my_selling_prices else p_row['now_cost']
+            
             players_data.append({
                 'id': pid, 'name': p_row['web_name'], 'team_short': p_row['team_short'],
                 'cost': effective_cost, 'current_val': p_row['now_cost'],
                 'pos': simple_pos, 'team': p_row['team'], 'ep': ep
             })
         
-        # NBA CUP LOGIC
+        # --- NBA CUP LOGIC ---
         cup_team_map = {}
         target_teams = ["MIA", "ORL", "NYK", "TOR", "PHX", "OKC", "SAS", "LAL"]
         for t_code in target_teams:
@@ -720,6 +718,7 @@ if run_btn:
                 prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] * p['cost'] for p in players_data]) <= total_budget_safe
                 prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in bc_players]) == 5
                 prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in fc_players]) == 5
+                
                 for t in teams_list:
                     t_players = [p for p in players_data if p['team'] == t]
                     prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in t_players]) <= MAX_PLAYERS_PER_TEAM
@@ -849,12 +848,25 @@ if run_btn:
                                     trans_out = previous_roster_ids - roster_ids
                                     if trans_in:
                                         st.markdown("**Transfers:**")
+                                        t_out = []
+                                        t_in = []
+                                        
                                         for pid in trans_out:
                                             p_obj = next((x for x in players_data if x['id'] == pid), None)
-                                            st.error(f"OUT: {p_obj['name']}")
+                                            if p_obj:
+                                                t_out.append(f"{p_obj['name']} ({p_obj['cost']/10}m)")
+                                                st.error(f"OUT: {p_obj['name']} (Sell: {p_obj['cost']/10}m)")
+                                        
                                         for pid in trans_in:
-                                            p_obj = next(x for x in players_data if x['id'] == pid)
-                                            st.success(f"IN: {p_obj['name']}")
+                                            p_obj = next((x for x in players_data if x['id'] == pid), None)
+                                            if p_obj:
+                                                t_in.append(f"{p_obj['name']} ({p_obj['cost']/10}m)")
+                                                st.success(f"IN: {p_obj['name']} (Buy: {p_obj['cost']/10}m)")
+                                                
+                                        # Capture for Log (Only Best Option)
+                                        if opt_idx == 0:
+                                            day_label = f"GW{gw_num} D{i+1}"
+                                            best_option_transfers.append(f"{day_label}: {', '.join(t_out)} -> {', '.join(t_in)}")
                                     
                                     previous_roster_ids = roster_ids
                                     
@@ -889,7 +901,8 @@ if run_btn:
                                     df['sort'] = df['Role'].map(role_order)
                                     st.dataframe(df.sort_values('sort').drop('sort', axis=1), use_container_width=True, hide_index=True)
 
-        log_simulation_end(log_id, 'SUCCESS', time.time()-start_time, result_summary=f"Score: {best_total_score:.1f}")
+        transfers_str = "; ".join(best_option_transfers)
+        log_simulation_end(log_id, 'SUCCESS', time.time()-start_time, result_summary=f"Score: {best_total_score:.1f}", transfers=transfers_str)
         
     except Exception as e:
         log_simulation_end(log_id, 'ERROR', time.time()-start_time, error_msg=str(e))
