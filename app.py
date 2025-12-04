@@ -8,7 +8,6 @@ import math
 import sqlite3
 import json
 import socket
-import urllib.parse
 
 # --- OPTIONAL: FIREBASE ADMIN FOR CLOUD LOGGING ---
 try:
@@ -22,7 +21,7 @@ except ImportError:
 BASE_URL = "https://nbafantasy.nba.com/api"
 DEFAULT_TEAM_ID = 17
 DEFAULT_GAMEWEEK = 7
-# ADMIN_PASSWORD removed in favor of Google Auth
+# Note: ADMIN_PASSWORD is now securely loaded from st.secrets
 
 POSITIONS = {"Back Court": 5, "Front Court": 5}
 MAX_PLAYERS_PER_TEAM = 2
@@ -243,88 +242,22 @@ def get_win_probability(team1_id, team2_id, teams_df):
         return rate1 / (rate1 + rate2)
     except: return 0.5
 
-# --- AUTHENTICATION HELPER ---
-def check_admin_auth():
-    # 1. Check secrets exist
-    if "google_auth" not in st.secrets:
-        st.error("⚠️ Google Auth secrets missing! Please add [google_auth] to secrets.toml.")
-        return False
-
-    client_id = st.secrets["google_auth"]["client_id"]
-    client_secret = st.secrets["google_auth"]["client_secret"]
-    redirect_uri = st.secrets["google_auth"]["redirect_uri"]
-    
-    # 2. Check if already authenticated
-    if st.session_state.get("admin_email") == "erzhenlin@gmail.com":
-        return True
-    
-    # 3. Handle Callback (Query Param Code)
-    auth_code = st.query_params.get("code")
-    
-    if auth_code:
-        try:
-            token_url = "https://oauth2.googleapis.com/token"
-            payload = {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "code": auth_code,
-                "grant_type": "authorization_code",
-                "redirect_uri": redirect_uri
-            }
-            resp = requests.post(token_url, data=payload)
-            if resp.status_code == 200:
-                access_token = resp.json()["access_token"]
-                user_info = requests.get(
-                    "https://www.googleapis.com/oauth2/v1/userinfo",
-                    headers={"Authorization": f"Bearer {access_token}"}
-                ).json()
-                
-                email = user_info.get("email")
-                if email == "erzhenlin@gmail.com":
-                    st.session_state["admin_email"] = email
-                    st.query_params.clear() # Clean URL
-                    st.rerun()
-                else:
-                    st.error(f"⛔ Access Denied: {email} is not authorized.")
-                    return False
-            else:
-                st.error("Authentication failed. Please try again.")
-        except Exception as e:
-            st.error(f"Auth Error: {e}")
-            
-    # 4. Show Login Button if not auth
-    if "admin_email" not in st.session_state:
-        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={client_id}&redirect_uri={urllib.parse.quote(redirect_uri)}&scope=email%20profile"
-        st.markdown(f"""
-            <div style="text-align:center; margin-top:50px;">
-                <h2>Admin Login Required</h2>
-                <p>Please sign in with your authorized Google account.</p>
-                <a href="{auth_url}" target="_self">
-                    <button style="background-color:#4285F4; color:white; border:none; padding:12px 24px; border-radius:4px; cursor:pointer; font-size:16px; font-weight:bold;">
-                        Sign in with Google
-                    </button>
-                </a>
-            </div>
-        """, unsafe_allow_html=True)
-    
-    return False
-
-# --- ADMIN PAGE ---
+# --- ADMIN PAGE (SECURE) ---
 if st.query_params.get("admin") == "true":
-    if check_admin_auth():
-        st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
-        st.success(f"Welcome, {st.session_state['admin_email']}")
-        
-        col1, col2 = st.columns([1, 6])
-        with col1:
-            if st.button("Refresh Logs"): st.rerun()
-            if st.button("Logout"):
-                del st.session_state["admin_email"]
-                st.rerun()
-        
-        if get_firestore_db(): st.caption("Source: Cloud (Firestore)")
-        else: st.caption("Source: Local (SQLite)")
-
+    st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
+    
+    # SECURE PASSWORD CHECK
+    if "admin_password" not in st.secrets:
+        st.error("⚠️ Admin password not configured in Secrets. Access Denied.")
+        st.stop()
+    
+    password = st.text_input("Enter Admin Password", type="password")
+    
+    if password == st.secrets["admin_password"]:
+        st.success("Access Granted")
+        if st.button("Refresh Logs"): st.rerun()
+        if get_firestore_db(): st.caption("Source: Cloud")
+        else: st.caption("Source: Local")
         logs_df = get_all_logs()
         if not logs_df.empty:
             logs_df['date_group'] = logs_df['timestamp'].apply(lambda x: str(x)[:10] if x else "Unknown")
@@ -339,8 +272,8 @@ if st.query_params.get("admin") == "true":
             csv = logs_df.to_csv(index=False)
             st.download_button("Download All Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
         else: st.info("No logs found.")
-    
-    st.stop() # Stop main app rendering
+    elif password: st.error("Incorrect Password")
+    st.stop()
 
 # --- MAIN APP UI ---
 
@@ -445,7 +378,6 @@ with st.sidebar:
                     name = f"{p_row['web_name'].values[0]} ({p_row['team_short'].values[0]})"
                     current_roster_names[name] = pid
     
-    # BUILD AVAILABLE PLAYERS FOR FORCE ADD (Not in current roster)
     all_available_for_add = {}
     for idx, row in active_players.iterrows():
         if row['id'] not in current_roster_ids_set:
@@ -473,8 +405,6 @@ with st.sidebar:
     )
     forced_add_ids = [all_available_for_add[n] for n in forced_add_names]
     
-    # SELECTOR 4: FORCE EXCLUDE (NEW)
-    # Exclude options already selected in forced add
     exclude_options = [name for name in all_available_for_add.keys() if name not in forced_add_names]
     forced_exclude_names = st.multiselect(
         "Force Exclude (Do Not Buy):",
@@ -491,6 +421,7 @@ if run_btn:
     start_time = time.time()
     log_id = log_simulation_start(team_id_input, gameweek_input, weeks_to_optimize)
     best_total_score = 0.0
+    best_option_transfers = []
     
     try:
         progress_bar = st.progress(0)
@@ -788,7 +719,6 @@ if run_btn:
                     if (pid, d_idx) in starter_vars:
                         prob += starter_vars[(pid, d_idx)] <= roster_vars[(pid, d_idx)]
                         prob += captain_vars[(pid, d_idx)] <= starter_vars[(pid, d_idx)]
-                        
                         game_prob = player_schedule[pid].get(d_idx, 0)
                         total_obj += starter_vars[(pid, d_idx)] * p['ep'] * game_prob
                         total_obj += captain_vars[(pid, d_idx)] * p['ep'] * game_prob
@@ -797,6 +727,7 @@ if run_btn:
             for w_data in weeks_schedule:
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
+                
                 if gw_indices:
                     week_transfers = []
                     for d_idx in gw_indices:
@@ -858,7 +789,6 @@ if run_btn:
                     cols[i+1].metric(f"GW{gw} EV", f"{score:.1f}")
                 
                 previous_roster_ids = set(my_player_ids)
-                best_option_transfers = [] # Reset for this run if needed, but we only log opt_idx==0
                 
                 for w_data in weeks_schedule:
                     gw_num = w_data['gw']
@@ -907,15 +837,16 @@ if run_btn:
                                         t_in = []
                                         for pid in trans_out:
                                             p_obj = next((x for x in players_data if x['id'] == pid), None)
-                                            st.error(f"OUT: {p_obj['name']} (Sell: {p_obj['cost']/10}m)")
+                                            st.error(f"OUT: {p_obj['name']}")
                                             t_out.append(p_obj['name'])
                                         for pid in trans_in:
                                             p_obj = next(x for x in players_data if x['id'] == pid)
-                                            st.success(f"IN: {p_obj['name']} (Buy: {p_obj['cost']/10}m)")
+                                            st.success(f"IN: {p_obj['name']}")
                                             t_in.append(p_obj['name'])
                                         
                                         if opt_idx == 0:
-                                            best_option_transfers.append(f"GW{gw_num} D{i+1}: {', '.join(t_out)} -> {', '.join(t_in)}")
+                                            day_label = f"GW{gw_num} D{i+1}"
+                                            best_option_transfers.append(f"{day_label}: {', '.join(t_out)} -> {', '.join(t_in)}")
                                     
                                     previous_roster_ids = roster_ids
                                     
