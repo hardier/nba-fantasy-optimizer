@@ -8,6 +8,7 @@ import math
 import sqlite3
 import json
 import socket
+import urllib.parse
 
 # --- OPTIONAL: FIREBASE ADMIN FOR CLOUD LOGGING ---
 try:
@@ -21,7 +22,7 @@ except ImportError:
 BASE_URL = "https://nbafantasy.nba.com/api"
 DEFAULT_TEAM_ID = 17
 DEFAULT_GAMEWEEK = 7
-ADMIN_PASSWORD = "admin124"
+# ADMIN_PASSWORD removed in favor of Google Auth
 
 POSITIONS = {"Back Court": 5, "Front Court": 5}
 MAX_PLAYERS_PER_TEAM = 2
@@ -84,13 +85,15 @@ def init_local_db():
             status TEXT,
             duration_sec REAL,
             error_msg TEXT,
-            result_summary TEXT
+            result_summary TEXT,
+            transfers TEXT
         )
     ''')
     c.execute("PRAGMA table_info(logs)")
     cols = [info[1] for info in c.fetchall()]
     if 'ip_address' not in cols: c.execute("ALTER TABLE logs ADD COLUMN ip_address TEXT")
     if 'location' not in cols: c.execute("ALTER TABLE logs ADD COLUMN location TEXT")
+    if 'transfers' not in cols: c.execute("ALTER TABLE logs ADD COLUMN transfers TEXT")
     conn.commit()
     conn.close()
 
@@ -118,20 +121,21 @@ def log_simulation_start(team_id, gw, weeks):
         conn.close()
         return log_id
 
-def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=None):
+def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=None, transfers=None):
     db = get_firestore_db()
     if db:
         if log_id:
             db.collection("logs").document(str(log_id)).update({
                 "status": status, "duration_sec": duration,
                 "error_msg": error_msg if error_msg else "",
-                "result_summary": result_summary if result_summary else ""
+                "result_summary": result_summary if result_summary else "",
+                "transfers": transfers if transfers else ""
             })
     else:
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
-        c.execute("UPDATE logs SET status=?, duration_sec=?, error_msg=?, result_summary=? WHERE id=?",
-            (status, duration, error_msg, result_summary, log_id))
+        c.execute("UPDATE logs SET status=?, duration_sec=?, error_msg=?, result_summary=?, transfers=? WHERE id=?",
+            (status, duration, error_msg, result_summary, transfers, log_id))
         conn.commit()
         conn.close()
 
@@ -239,15 +243,88 @@ def get_win_probability(team1_id, team2_id, teams_df):
         return rate1 / (rate1 + rate2)
     except: return 0.5
 
+# --- AUTHENTICATION HELPER ---
+def check_admin_auth():
+    # 1. Check secrets exist
+    if "google_auth" not in st.secrets:
+        st.error("⚠️ Google Auth secrets missing! Please add [google_auth] to secrets.toml.")
+        return False
+
+    client_id = st.secrets["google_auth"]["client_id"]
+    client_secret = st.secrets["google_auth"]["client_secret"]
+    redirect_uri = st.secrets["google_auth"]["redirect_uri"]
+    
+    # 2. Check if already authenticated
+    if st.session_state.get("admin_email") == "erzhenlin@gmail.com":
+        return True
+    
+    # 3. Handle Callback (Query Param Code)
+    auth_code = st.query_params.get("code")
+    
+    if auth_code:
+        try:
+            token_url = "https://oauth2.googleapis.com/token"
+            payload = {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": auth_code,
+                "grant_type": "authorization_code",
+                "redirect_uri": redirect_uri
+            }
+            resp = requests.post(token_url, data=payload)
+            if resp.status_code == 200:
+                access_token = resp.json()["access_token"]
+                user_info = requests.get(
+                    "https://www.googleapis.com/oauth2/v1/userinfo",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                ).json()
+                
+                email = user_info.get("email")
+                if email == "erzhenlin@gmail.com":
+                    st.session_state["admin_email"] = email
+                    st.query_params.clear() # Clean URL
+                    st.rerun()
+                else:
+                    st.error(f"⛔ Access Denied: {email} is not authorized.")
+                    return False
+            else:
+                st.error("Authentication failed. Please try again.")
+        except Exception as e:
+            st.error(f"Auth Error: {e}")
+            
+    # 4. Show Login Button if not auth
+    if "admin_email" not in st.session_state:
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={client_id}&redirect_uri={urllib.parse.quote(redirect_uri)}&scope=email%20profile"
+        st.markdown(f"""
+            <div style="text-align:center; margin-top:50px;">
+                <h2>Admin Login Required</h2>
+                <p>Please sign in with your authorized Google account.</p>
+                <a href="{auth_url}" target="_self">
+                    <button style="background-color:#4285F4; color:white; border:none; padding:12px 24px; border-radius:4px; cursor:pointer; font-size:16px; font-weight:bold;">
+                        Sign in with Google
+                    </button>
+                </a>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    return False
+
 # --- ADMIN PAGE ---
 if st.query_params.get("admin") == "true":
-    st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
-    password = st.text_input("Enter Admin Password", type="password")
-    if password == ADMIN_PASSWORD:
-        st.success("Access Granted")
-        if st.button("Refresh Logs"): st.rerun()
-        if get_firestore_db(): st.caption("Source: Cloud")
-        else: st.caption("Source: Local")
+    if check_admin_auth():
+        st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
+        st.success(f"Welcome, {st.session_state['admin_email']}")
+        
+        col1, col2 = st.columns([1, 6])
+        with col1:
+            if st.button("Refresh Logs"): st.rerun()
+            if st.button("Logout"):
+                del st.session_state["admin_email"]
+                st.rerun()
+        
+        if get_firestore_db(): st.caption("Source: Cloud (Firestore)")
+        else: st.caption("Source: Local (SQLite)")
+
         logs_df = get_all_logs()
         if not logs_df.empty:
             logs_df['date_group'] = logs_df['timestamp'].apply(lambda x: str(x)[:10] if x else "Unknown")
@@ -262,8 +339,8 @@ if st.query_params.get("admin") == "true":
             csv = logs_df.to_csv(index=False)
             st.download_button("Download All Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
         else: st.info("No logs found.")
-    elif password: st.error("Incorrect Password")
-    st.stop()
+    
+    st.stop() # Stop main app rendering
 
 # --- MAIN APP UI ---
 
@@ -711,10 +788,12 @@ if run_btn:
                     if (pid, d_idx) in starter_vars:
                         prob += starter_vars[(pid, d_idx)] <= roster_vars[(pid, d_idx)]
                         prob += captain_vars[(pid, d_idx)] <= starter_vars[(pid, d_idx)]
+                        
                         game_prob = player_schedule[pid].get(d_idx, 0)
                         total_obj += starter_vars[(pid, d_idx)] * p['ep'] * game_prob
                         total_obj += captain_vars[(pid, d_idx)] * p['ep'] * game_prob
 
+            # Aggregated Constraints (Weekly)
             for w_data in weeks_schedule:
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
@@ -779,6 +858,7 @@ if run_btn:
                     cols[i+1].metric(f"GW{gw} EV", f"{score:.1f}")
                 
                 previous_roster_ids = set(my_player_ids)
+                best_option_transfers = [] # Reset for this run if needed, but we only log opt_idx==0
                 
                 for w_data in weeks_schedule:
                     gw_num = w_data['gw']
@@ -823,12 +903,19 @@ if run_btn:
                                     trans_out = previous_roster_ids - roster_ids
                                     if trans_in:
                                         st.markdown("**Transfers:**")
+                                        t_out = []
+                                        t_in = []
                                         for pid in trans_out:
                                             p_obj = next((x for x in players_data if x['id'] == pid), None)
-                                            st.error(f"OUT: {p_obj['name']}")
+                                            st.error(f"OUT: {p_obj['name']} (Sell: {p_obj['cost']/10}m)")
+                                            t_out.append(p_obj['name'])
                                         for pid in trans_in:
                                             p_obj = next(x for x in players_data if x['id'] == pid)
-                                            st.success(f"IN: {p_obj['name']}")
+                                            st.success(f"IN: {p_obj['name']} (Buy: {p_obj['cost']/10}m)")
+                                            t_in.append(p_obj['name'])
+                                        
+                                        if opt_idx == 0:
+                                            best_option_transfers.append(f"GW{gw_num} D{i+1}: {', '.join(t_out)} -> {', '.join(t_in)}")
                                     
                                     previous_roster_ids = roster_ids
                                     
@@ -863,7 +950,8 @@ if run_btn:
                                     df['sort'] = df['Role'].map(role_order)
                                     st.dataframe(df.sort_values('sort').drop('sort', axis=1), use_container_width=True, hide_index=True)
 
-        log_simulation_end(log_id, 'SUCCESS', time.time()-start_time, result_summary=f"Score: {best_total_score:.1f}")
+        transfers_str = "; ".join(best_option_transfers)
+        log_simulation_end(log_id, 'SUCCESS', time.time()-start_time, result_summary=f"Score: {best_total_score:.1f}", transfers=transfers_str)
         
     except Exception as e:
         log_simulation_end(log_id, 'ERROR', time.time()-start_time, error_msg=str(e))
