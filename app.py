@@ -21,6 +21,7 @@ except ImportError:
 BASE_URL = "https://nbafantasy.nba.com/api"
 DEFAULT_TEAM_ID = 17
 DEFAULT_GAMEWEEK = 7
+ADMIN_PASSWORD = "admin124"
 
 POSITIONS = {"Back Court": 5, "Front Court": 5}
 MAX_PLAYERS_PER_TEAM = 2
@@ -28,6 +29,21 @@ TRANSFERS_ALLOWED = 2
 ROSTER_SIZE = 10
 
 st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide", page_icon="🏀")
+
+# --- HIDE STREAMLIT BRANDING & GITHUB LINK ---
+hide_streamlit_style = """
+<style>
+    /* Hides the top right hamburger menu */
+    #MainMenu {visibility: hidden;}
+    
+    /* Hides the "Made with Streamlit" footer */
+    footer {visibility: hidden;}
+    
+    /* Hides the top header bar (contains GitHub icon, Deploy button, etc.) */
+    header {visibility: hidden;}
+</style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # --- DATABASE & LOGGING FUNCTIONS ---
 
@@ -249,14 +265,8 @@ def get_win_probability(team1_id, team2_id, teams_df):
 # --- ADMIN PAGE ---
 if st.query_params.get("admin") == "true":
     st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
-    
-    if "admin_password" not in st.secrets:
-        st.error("Admin password not configured in secrets. Please add 'admin_password' to your secrets.toml file.")
-        st.stop()
-        
     password = st.text_input("Enter Admin Password", type="password")
-    
-    if password == st.secrets["admin_password"]:
+    if password == ADMIN_PASSWORD:
         st.success("Access Granted")
         if st.button("Refresh Logs"): st.rerun()
         if get_firestore_db(): st.caption("Source: Cloud")
@@ -732,6 +742,7 @@ if run_btn:
                     if (pid, d_idx) in starter_vars:
                         prob += starter_vars[(pid, d_idx)] <= roster_vars[(pid, d_idx)]
                         prob += captain_vars[(pid, d_idx)] <= starter_vars[(pid, d_idx)]
+                        
                         game_prob = player_schedule[pid].get(d_idx, 0)
                         total_obj += starter_vars[(pid, d_idx)] * p['ep'] * game_prob
                         total_obj += captain_vars[(pid, d_idx)] * p['ep'] * game_prob
