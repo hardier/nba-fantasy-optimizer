@@ -536,10 +536,30 @@ if run_btn:
 
         # 5. Fetch Initial Roster
         status_text.text("Fetching initial roster...")
+        
+        # Attempt 1: Try fetching from the PREVIOUS event (Standard logic for existing teams)
         my_team_data = fetch_picks(team_id_input, roster_source_event_id)
+        
+        # Attempt 2: If failed, try fetching from the CURRENT target start event (Logic for NEW teams)
         if not my_team_data and not past_event_ids:
-            my_team_data = fetch_picks(team_id_input, roster_source_event_id - 1)
-        if not my_team_data: raise Exception(f"Could not fetch initial roster for team {team_id_input}")
+            # Fallback to the first event of the target week
+            fallback_eid = week1_events[0]
+            status_text.text(f"New team detected? Trying roster from Event {fallback_eid}...")
+            my_team_data = fetch_picks(team_id_input, fallback_eid)
+
+        if not my_team_data:
+            # Final check: If even that fails, user might have wrong ID
+            st.error(f"""
+            Could not fetch roster for Team ID **{team_id_input}**.
+            
+            **Possible reasons:**
+            1. The Team ID is incorrect.
+            2. The team was created very recently and the API hasn't updated.
+            3. The NBA Fantasy API is currently in maintenance (try again in 15 mins).
+            
+            *Tip: You can use Team ID '0' to start with a blank 100m budget.*
+            """)
+            raise Exception("Roster fetch failed")
             
         picks = my_team_data['picks']
         my_bank = my_team_data['entry_history']['bank']
