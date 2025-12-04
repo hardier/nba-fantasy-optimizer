@@ -46,53 +46,52 @@ def get_firestore_db():
 
 def get_remote_ip():
     """
-    Robust strategy to get the client Public IP address.
-    1. Checks standard proxy headers (X-Forwarded-For, X-Real-IP).
-    2. Falls back to external API if running locally or headers fail.
+    Robust strategy to get the client IP address.
+    1. Checks standard proxy headers (X-Forwarded-For).
+    2. Returns header IP (even if private) to distinguish LAN users.
+    3. Falls back to external API only if no headers found (Server IP).
     """
     ip = None
     
     # 1. Try Streamlit Headers (Works on Streamlit Cloud/Docker Proxies)
     try:
-        headers = None
-        # New Streamlit (1.38+)
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
-        # Fallback for Older Streamlit
-        elif hasattr(st, "request") and hasattr(st.request, "headers"):
-             headers = st.request.headers
-        
-        if headers:
             if "X-Forwarded-For" in headers:
+                # Take first IP in list (Client IP)
                 ip = headers["X-Forwarded-For"].split(",")[0].strip()
             elif "X-Real-IP" in headers:
                 ip = headers["X-Real-IP"].strip()
     except Exception: 
         pass
 
-    # 2. Validate & Fallback
-    is_private = False
-    if not ip or ip in ["Unknown/Local", "localhost", "::1"]:
-        is_private = True
-    elif ip.startswith("127.") or ip.startswith("10.") or ip.startswith("192.168."):
-        is_private = True
-    elif ip.startswith("172."):
-        parts = ip.split(".")
-        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
-            is_private = True
-
-    if is_private:
-        try:
-            response = requests.get("https://api.ipify.org", timeout=2)
-            if response.status_code == 200:
-                return response.text
-        except Exception:
-            pass
-            
-    return ip if ip else "Unknown/Local"
+    # 2. If Header IP found, return it (Prioritize individual device ID over Gateway IP)
+    if ip:
+        return ip
+        
+    # 3. Fallback: If NO headers (e.g. direct localhost), get Server Public IP
+    try:
+        response = requests.get("https://api.ipify.org", timeout=2)
+        if response.status_code == 200:
+            return response.text
+    except Exception:
+        pass
+    
+    return "Unknown/Local"
 
 def get_ip_location(ip):
-    if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]: return "Localhost"
+    """Resolves IP to location using free API, handles private IPs."""
+    # Check for Private/Local IPs to avoid API call waste
+    is_private = False
+    if not ip or ip in ["Unknown/Local", "localhost", "::1", "127.0.0.1"]: is_private = True
+    elif ip.startswith("10.") or ip.startswith("192.168."): is_private = True
+    elif ip.startswith("172."):
+        parts = ip.split(".")
+        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31: is_private = True
+        
+    if is_private:
+        return "Local Network"
+
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
         if response.status_code == 200:
@@ -122,15 +121,13 @@ def init_local_db():
             status TEXT,
             duration_sec REAL,
             error_msg TEXT,
-            result_summary TEXT,
-            transfers TEXT
+            result_summary TEXT
         )
     ''')
     c.execute("PRAGMA table_info(logs)")
     cols = [info[1] for info in c.fetchall()]
     if 'ip_address' not in cols: c.execute("ALTER TABLE logs ADD COLUMN ip_address TEXT")
     if 'location' not in cols: c.execute("ALTER TABLE logs ADD COLUMN location TEXT")
-    if 'transfers' not in cols: c.execute("ALTER TABLE logs ADD COLUMN transfers TEXT")
     conn.commit()
     conn.close()
 
@@ -158,21 +155,20 @@ def log_simulation_start(team_id, gw, weeks):
         conn.close()
         return log_id
 
-def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=None, transfers=None):
+def log_simulation_end(log_id, status, duration, error_msg=None, result_summary=None):
     db = get_firestore_db()
     if db:
         if log_id:
             db.collection("logs").document(str(log_id)).update({
                 "status": status, "duration_sec": duration,
                 "error_msg": error_msg if error_msg else "",
-                "result_summary": result_summary if result_summary else "",
-                "transfers": transfers if transfers else ""
+                "result_summary": result_summary if result_summary else ""
             })
     else:
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
-        c.execute("UPDATE logs SET status=?, duration_sec=?, error_msg=?, result_summary=?, transfers=? WHERE id=?",
-            (status, duration, error_msg, result_summary, transfers, log_id))
+        c.execute("UPDATE logs SET status=?, duration_sec=?, error_msg=?, result_summary=? WHERE id=?",
+            (status, duration, error_msg, result_summary, log_id))
         conn.commit()
         conn.close()
 
@@ -238,6 +234,7 @@ def calculate_selling_price(purchase_price, now_cost):
 
 @st.cache_data(ttl=86400)
 def get_player_history_avg(player_id):
+    """Last 7 active games avg (points > 0)."""
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
@@ -245,15 +242,16 @@ def get_player_history_avg(player_id):
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
+    # Injury check
     if len(history) >= 2:
         m1 = int(history[0].get('minutes', 0))
         m2 = int(history[1].get('minutes', 0))
         if m1 == 0 and m2 == 0: return None
-    played_games = [g for g in history if g.get('total_points', 0) > 0]
-    last_5 = played_games[:5]
-    if not last_5: return 0.0
-    total_points = sum(g['total_points'] for g in last_5)
-    return total_points / len(last_5)
+    # Average calc using last 7 entries regardless of score
+    last_n = history[:7]
+    if not last_n: return 0.0
+    total_points = sum(g.get('total_points', 0) for g in last_n)
+    return total_points / len(last_n)
 
 def get_player_score_for_date(player_id, target_date):
     url = f"{BASE_URL}/element-summary/{player_id}/"
@@ -444,7 +442,6 @@ if run_btn:
     start_time = time.time()
     log_id = log_simulation_start(team_id_input, gameweek_input, weeks_to_optimize)
     best_total_score = 0.0
-    best_option_transfers = [] # To store transfer log
     
     try:
         progress_bar = st.progress(0)
@@ -536,30 +533,10 @@ if run_btn:
 
         # 5. Fetch Initial Roster
         status_text.text("Fetching initial roster...")
-        
-        # Attempt 1: Try fetching from the PREVIOUS event (Standard logic for existing teams)
         my_team_data = fetch_picks(team_id_input, roster_source_event_id)
-        
-        # Attempt 2: If failed, try fetching from the CURRENT target start event (Logic for NEW teams)
         if not my_team_data and not past_event_ids:
-            # Fallback to the first event of the target week
-            fallback_eid = week1_events[0]
-            status_text.text(f"New team detected? Trying roster from Event {fallback_eid}...")
-            my_team_data = fetch_picks(team_id_input, fallback_eid)
-
-        if not my_team_data:
-            # Final check: If even that fails, user might have wrong ID
-            st.error(f"""
-            Could not fetch roster for Team ID **{team_id_input}**.
-            
-            **Possible reasons:**
-            1. The Team ID is incorrect.
-            2. The team was created very recently and the API hasn't updated.
-            3. The NBA Fantasy API is currently in maintenance (try again in 15 mins).
-            
-            *Tip: You can use Team ID '0' to start with a blank 100m budget.*
-            """)
-            raise Exception("Roster fetch failed")
+            my_team_data = fetch_picks(team_id_input, roster_source_event_id - 1)
+        if not my_team_data: raise Exception(f"Could not fetch initial roster for team {team_id_input}")
             
         picks = my_team_data['picks']
         my_bank = my_team_data['entry_history']['bank']
@@ -612,6 +589,7 @@ if run_btn:
                     owned_injured_pids.append(pid)
             
             if pid in forced_keep_ids or pid in forced_add_ids: is_doubtful = False
+
             avg = get_player_history_avg(pid)
             if avg is None or is_doubtful:
                 if pid in my_player_ids or pid in forced_add_ids: avg = 0.0
@@ -868,25 +846,12 @@ if run_btn:
                                     trans_out = previous_roster_ids - roster_ids
                                     if trans_in:
                                         st.markdown("**Transfers:**")
-                                        t_out = []
-                                        t_in = []
-                                        
                                         for pid in trans_out:
                                             p_obj = next((x for x in players_data if x['id'] == pid), None)
-                                            if p_obj:
-                                                t_out.append(f"{p_obj['name']} ({p_obj['cost']/10}m)")
-                                                st.error(f"OUT: {p_obj['name']} (Sell: {p_obj['cost']/10}m)")
-                                        
+                                            st.error(f"OUT: {p_obj['name']}")
                                         for pid in trans_in:
-                                            p_obj = next((x for x in players_data if x['id'] == pid), None)
-                                            if p_obj:
-                                                t_in.append(f"{p_obj['name']} ({p_obj['cost']/10}m)")
-                                                st.success(f"IN: {p_obj['name']} (Buy: {p_obj['cost']/10}m)")
-                                                
-                                        # Capture for Log (Only Best Option)
-                                        if opt_idx == 0:
-                                            day_label = f"GW{gw_num} D{i+1}"
-                                            best_option_transfers.append(f"{day_label}: {', '.join(t_out)} -> {', '.join(t_in)}")
+                                            p_obj = next(x for x in players_data if x['id'] == pid)
+                                            st.success(f"IN: {p_obj['name']}")
                                     
                                     previous_roster_ids = roster_ids
                                     
@@ -921,8 +886,7 @@ if run_btn:
                                     df['sort'] = df['Role'].map(role_order)
                                     st.dataframe(df.sort_values('sort').drop('sort', axis=1), use_container_width=True, hide_index=True)
 
-        transfers_str = "; ".join(best_option_transfers)
-        log_simulation_end(log_id, 'SUCCESS', time.time()-start_time, result_summary=f"Score: {best_total_score:.1f}", transfers=transfers_str)
+        log_simulation_end(log_id, 'SUCCESS', time.time()-start_time, result_summary=f"Score: {best_total_score:.1f}")
         
     except Exception as e:
         log_simulation_end(log_id, 'ERROR', time.time()-start_time, error_msg=str(e))
