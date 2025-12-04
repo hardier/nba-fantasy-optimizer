@@ -45,13 +45,62 @@ def get_firestore_db():
         return None
 
 def get_remote_ip():
+    """
+    Robust strategy to get the client Public IP address.
+    1. Checks standard proxy headers (X-Forwarded-For, X-Real-IP).
+    2. Falls back to external API if running locally or headers fail.
+    """
+    ip = None
+    
+    # 1. Try Streamlit Headers (Works on Streamlit Cloud/Docker Proxies)
     try:
+        headers = None
+        # New Streamlit (1.38+)
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
+        # Fallback for Older Streamlit
+        elif hasattr(st, "request") and hasattr(st.request, "headers"):
+             headers = st.request.headers
+        
+        if headers:
+            # Priority 1: X-Forwarded-For (Standard for Load Balancers)
+            # Format: "client_ip, proxy1, proxy2" -> we want the first one
             if "X-Forwarded-For" in headers:
-                return headers["X-Forwarded-For"].split(",")[0]
-    except Exception: pass
-    return "Unknown/Local"
+                ip = headers["X-Forwarded-For"].split(",")[0].strip()
+            # Priority 2: X-Real-IP (Nginx/Render/Heroku specific)
+            elif "X-Real-IP" in headers:
+                ip = headers["X-Real-IP"].strip()
+    except Exception: 
+        pass
+
+    # 2. Validate & Fallback
+    # If we didn't get an IP, or we got a private/internal one (10.x, 192.168.x, 127.x), 
+    # try fetching the network's public IP via external service.
+    
+    is_private = False
+    if not ip or ip in ["Unknown/Local", "localhost", "::1"]:
+        is_private = True
+    elif ip.startswith("127.") or ip.startswith("10.") or ip.startswith("192.168."):
+        is_private = True
+    elif ip.startswith("172."):
+        # 172.16.0.0 - 172.31.255.255 are private
+        parts = ip.split(".")
+        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+            is_private = True
+
+    if is_private:
+        try:
+            # This tells us the Public IP of the SERVER running the script.
+            # On Localhost, this is YOUR IP. On Cloud, this is the CLOUD SERVER'S IP.
+            # This is useful for debugging connectivity but might not be the User's IP in a Cloud setting.
+            # However, if headers failed, it's the best we have to identify the instance location.
+            response = requests.get("https://api.ipify.org", timeout=2)
+            if response.status_code == 200:
+                return response.text
+        except Exception:
+            pass
+            
+    return ip if ip else "Unknown/Local"
 
 def get_ip_location(ip):
     if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]: return "Localhost"
@@ -369,16 +418,12 @@ with st.sidebar:
                     current_roster_names[name] = pid
     
     # BUILD AVAILABLE PLAYERS FOR FORCE ADD (Not in current roster)
-    # Use 'web_name' and 'team_short' for display
     all_available_for_add = {}
-    # Filter active_players where ID not in current_roster_ids_set
-    # Optimization: iterate dataframe
     for idx, row in active_players.iterrows():
         if row['id'] not in current_roster_ids_set:
             name_label = f"{row['web_name']} ({row['team_short']}) - {row['now_cost']/10}m"
             all_available_for_add[name_label] = row['id']
 
-    # SELECTOR 1: FORCE TRANSFER OUT
     forced_drop_names = st.multiselect(
         "Force Transfer Out (Start of Sim):",
         options=list(current_roster_names.keys()),
@@ -386,7 +431,6 @@ with st.sidebar:
     )
     forced_drop_ids = [current_roster_names[n] for n in forced_drop_names]
     
-    # SELECTOR 2: FORCE KEEP (NEW)
     forced_keep_names = st.multiselect(
         "Force KEEP (Ignore Injury/Low Chance):",
         options=list(current_roster_names.keys()),
@@ -394,7 +438,6 @@ with st.sidebar:
     )
     forced_keep_ids = [current_roster_names[n] for n in forced_keep_names]
     
-    # SELECTOR 3: FORCE TRANSFER IN (NEW)
     forced_add_names = st.multiselect(
         "Force Transfer In (Start of Sim):",
         options=list(all_available_for_add.keys()),
@@ -408,15 +451,11 @@ with st.sidebar:
 if run_btn:
     start_time = time.time()
     log_id = log_simulation_start(team_id_input, gameweek_input, weeks_to_optimize)
-    
-    # --- INIT SCORE VARIABLE EARLY TO PREVENT NAMEERROR ---
     best_total_score = 0.0
     
     try:
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
-        # Data already fetched above (bootstrap, active_players), reusing...
         
         # 2. Determine Schedule
         status_text.text(f"Building schedule for {weeks_to_optimize} weeks...")
@@ -539,28 +578,23 @@ if run_btn:
         top_candidates = available_players.sort_values('total_points', ascending=False).head(200)
         candidate_ids = set(top_candidates['id'].tolist())
         for pid in my_player_ids: candidate_ids.add(pid)
-        # Add forced ADD players to candidates
         for pid in forced_add_ids: candidate_ids.add(pid)
         
         players_to_fetch = active_players[active_players['id'].isin(candidate_ids)]
         player_eps = {}
         
-        owned_injured_pids = [] # Track injured players we own for forced selling
+        owned_injured_pids = []
         
         for i, (index, player) in enumerate(players_to_fetch.iterrows()):
             if i % 20 == 0: progress_bar.progress(int((i / len(players_to_fetch)) * 90))
             pid = player['id']
             chance = player['chance_of_playing_next_round']
             is_doubtful = False
-            
             if pd.notna(chance) and chance < 50: 
                 is_doubtful = True
-                if pid in my_player_ids:
-                    owned_injured_pids.append(pid)
+                if pid in my_player_ids: owned_injured_pids.append(pid)
             
-            if pid in forced_keep_ids or pid in forced_add_ids:
-                is_doubtful = False
-
+            if pid in forced_keep_ids or pid in forced_add_ids: is_doubtful = False
             avg = get_player_history_avg(pid)
             if avg is None or is_doubtful:
                 if pid in my_player_ids or pid in forced_add_ids: avg = 0.0
@@ -579,14 +613,13 @@ if run_btn:
             pos = p_row['position_name']
             simple_pos = "Back Court" if ("Guard" in pos or "Back" in pos) else "Front Court"
             effective_cost = my_selling_prices[pid] if pid in my_selling_prices else p_row['now_cost']
-            
             players_data.append({
                 'id': pid, 'name': p_row['web_name'], 'team_short': p_row['team_short'],
                 'cost': effective_cost, 'current_val': p_row['now_cost'],
                 'pos': simple_pos, 'team': p_row['team'], 'ep': ep
             })
         
-        # --- NBA CUP LOGIC ---
+        # NBA CUP LOGIC
         cup_team_map = {}
         target_teams = ["MIA", "ORL", "NYK", "TOR", "PHX", "OKC", "SAS", "LAL"]
         for t_code in target_teams:
@@ -599,7 +632,6 @@ if run_btn:
             p_b = get_win_probability(cup_team_map['NYK'], cup_team_map['TOR'], teams)
             p_c = get_win_probability(cup_team_map['PHX'], cup_team_map['OKC'], teams)
             p_d = get_win_probability(cup_team_map['SAS'], cup_team_map['LAL'], teams)
-            
             probs['MIA_D6'] = p_a
             probs['ORL_D6'] = 1 - p_a
             probs['NYK_D6'] = p_b
@@ -608,12 +640,9 @@ if run_btn:
             probs['OKC_D6'] = 1 - p_c
             probs['SAS_D6'] = p_d
             probs['LAL_D6'] = 1 - p_d
-            
-            for t in target_teams:
-                probs[f"{t}_FINAL"] = probs[f"{t}_D6"] * 0.5
+            for t in target_teams: probs[f"{t}_FINAL"] = probs[f"{t}_D6"] * 0.5
 
         player_schedule = {p['id']: {} for p in players_data}
-        
         for _, f in gw_fixtures.iterrows():
             eid = f['event']
             if eid in event_id_to_solver_idx:
@@ -633,8 +662,7 @@ if run_btn:
                     t_code = p['team_short']
                     if t_code in cup_team_map:
                         prob_key = f"{t_code}_D6"
-                        if prob_key in probs:
-                            player_schedule[p['id']][s_idx] = probs[prob_key]
+                        if prob_key in probs: player_schedule[p['id']][s_idx] = probs[prob_key]
 
         if gw9_evs and len(gw9_evs) >= 1:
             final_eid = gw9_evs[0]
@@ -644,8 +672,7 @@ if run_btn:
                     t_code = p['team_short']
                     if t_code in cup_team_map:
                         prob_key = f"{t_code}_FINAL"
-                        if prob_key in probs:
-                            player_schedule[p['id']][f_idx] = probs[prob_key]
+                        if prob_key in probs: player_schedule[p['id']][f_idx] = probs[prob_key]
 
         num_future_days = len(future_event_ids)
         previous_solutions_constraints = []
@@ -664,7 +691,6 @@ if run_btn:
                     pid = p['id']
                     roster_vars[(pid, d_idx)] = pulp.LpVariable(f"R_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
                     trans_in_vars[(pid, d_idx)] = pulp.LpVariable(f"T_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
-                    
                     sched_prob = player_schedule[pid].get(d_idx, 0)
                     if sched_prob > 0:
                         starter_vars[(pid, d_idx)] = pulp.LpVariable(f"S_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
@@ -679,14 +705,10 @@ if run_btn:
 
             for pid in forced_drop_ids:
                 for d_idx in range(num_future_days):
-                    if (pid, d_idx) in roster_vars:
-                         prob += roster_vars[(pid, d_idx)] == 0
+                    if (pid, d_idx) in roster_vars: prob += roster_vars[(pid, d_idx)] == 0
 
-            # --- FORCE ADD CONSTRAINT (Manual) ---
             for pid in forced_add_ids:
-                # Must be in roster on Day 0
-                if (pid, 0) in roster_vars:
-                     prob += roster_vars[(pid, 0)] == 1
+                if (pid, 0) in roster_vars: prob += roster_vars[(pid, 0)] == 1
 
             teams_list = elements['team'].unique()
             bc_players = [p for p in players_data if p['pos'] == "Back Court"]
@@ -698,7 +720,6 @@ if run_btn:
                 prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] * p['cost'] for p in players_data]) <= total_budget_safe
                 prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in bc_players]) == 5
                 prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in fc_players]) == 5
-                
                 for t in teams_list:
                     t_players = [p for p in players_data if p['team'] == t]
                     prob += pulp.lpSum([roster_vars[(p['id'], d_idx)] for p in t_players]) <= MAX_PLAYERS_PER_TEAM
@@ -716,16 +737,13 @@ if run_btn:
                     if (pid, d_idx) in starter_vars:
                         prob += starter_vars[(pid, d_idx)] <= roster_vars[(pid, d_idx)]
                         prob += captain_vars[(pid, d_idx)] <= starter_vars[(pid, d_idx)]
-                        
                         game_prob = player_schedule[pid].get(d_idx, 0)
                         total_obj += starter_vars[(pid, d_idx)] * p['ep'] * game_prob
                         total_obj += captain_vars[(pid, d_idx)] * p['ep'] * game_prob
 
-            # Aggregated Constraints (Weekly)
             for w_data in weeks_schedule:
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
-                
                 if gw_indices:
                     week_transfers = []
                     for d_idx in gw_indices:
