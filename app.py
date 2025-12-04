@@ -21,7 +21,6 @@ except ImportError:
 BASE_URL = "https://nbafantasy.nba.com/api"
 DEFAULT_TEAM_ID = 17
 DEFAULT_GAMEWEEK = 7
-ADMIN_PASSWORD = "admin124"
 
 POSITIONS = {"Back Court": 5, "Front Court": 5}
 MAX_PLAYERS_PER_TEAM = 2
@@ -30,20 +29,16 @@ ROSTER_SIZE = 10
 
 st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide", page_icon="🏀")
 
-# --- HIDE STREAMLIT BRANDING & GITHUB LINK ---
-hide_streamlit_style = """
-<style>
-    /* Hides the top right hamburger menu */
-    #MainMenu {visibility: hidden;}
-    
-    /* Hides the "Made with Streamlit" footer */
-    footer {visibility: hidden;}
-    
-    /* Hides the top header bar (contains GitHub icon, Deploy button, etc.) */
-    header {visibility: hidden;}
-</style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+# --- HIDE STREAMLIT BRANDING & GITHUB LINKS ---
+st.markdown("""
+    <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        .stDeployButton {display:none;}
+        [data-testid="stToolbar"] {visibility: hidden !important;}
+    </style>
+""", unsafe_allow_html=True)
 
 # --- DATABASE & LOGGING FUNCTIONS ---
 
@@ -265,8 +260,14 @@ def get_win_probability(team1_id, team2_id, teams_df):
 # --- ADMIN PAGE ---
 if st.query_params.get("admin") == "true":
     st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
+    
+    if "admin_password" not in st.secrets:
+        st.error("Admin password not configured in secrets. Access Denied.")
+        st.stop()
+        
     password = st.text_input("Enter Admin Password", type="password")
-    if password == ADMIN_PASSWORD:
+    
+    if password == st.secrets["admin_password"]:
         st.success("Access Granted")
         if st.button("Refresh Logs"): st.rerun()
         if get_firestore_db(): st.caption("Source: Cloud")
@@ -798,8 +799,7 @@ if run_btn:
                         d_idx = event_id_to_solver_idx[eid]
                         for p in players_data:
                             if (p['id'], d_idx) in starter_vars and starter_vars[(p['id'], d_idx)].varValue > 0.5:
-                                game_prob = player_schedule[p['id']].get(d_idx, 0)
-                                pts = (p['ep'] / 10.0) * game_prob
+                                pts = p['ep'] / 10.0
                                 if (p['id'], d_idx) in captain_vars and captain_vars[(p['id'], d_idx)].varValue > 0.5:
                                     pts *= 2
                                 gw_total += pts
