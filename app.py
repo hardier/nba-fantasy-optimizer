@@ -354,6 +354,7 @@ with st.sidebar:
                 if past_eids: roster_source_eid = past_eids[-1]
 
     current_roster_names = {}
+    current_roster_ids_set = set()
     if roster_source_eid:
         team_data = fetch_picks(team_id_input, event_id=roster_source_eid)
         if not team_data:
@@ -361,11 +362,23 @@ with st.sidebar:
         if team_data:
             for p in team_data['picks']:
                 pid = p['element']
+                current_roster_ids_set.add(pid)
                 p_row = active_players.loc[active_players['id'] == pid]
                 if not p_row.empty:
                     name = f"{p_row['web_name'].values[0]} ({p_row['team_short'].values[0]})"
                     current_roster_names[name] = pid
+    
+    # BUILD AVAILABLE PLAYERS FOR FORCE ADD (Not in current roster)
+    # Use 'web_name' and 'team_short' for display
+    all_available_for_add = {}
+    # Filter active_players where ID not in current_roster_ids_set
+    # Optimization: iterate dataframe
+    for idx, row in active_players.iterrows():
+        if row['id'] not in current_roster_ids_set:
+            name_label = f"{row['web_name']} ({row['team_short']}) - {row['now_cost']/10}m"
+            all_available_for_add[name_label] = row['id']
 
+    # SELECTOR 1: FORCE TRANSFER OUT
     forced_drop_names = st.multiselect(
         "Force Transfer Out (Start of Sim):",
         options=list(current_roster_names.keys()),
@@ -373,12 +386,21 @@ with st.sidebar:
     )
     forced_drop_ids = [current_roster_names[n] for n in forced_drop_names]
     
+    # SELECTOR 2: FORCE KEEP (NEW)
     forced_keep_names = st.multiselect(
         "Force KEEP (Ignore Injury/Low Chance):",
         options=list(current_roster_names.keys()),
         help="Select players you want to keep even if they are flagged as doubtful (<50% chance)."
     )
     forced_keep_ids = [current_roster_names[n] for n in forced_keep_names]
+    
+    # SELECTOR 3: FORCE TRANSFER IN (NEW)
+    forced_add_names = st.multiselect(
+        "Force Transfer In (Start of Sim):",
+        options=list(all_available_for_add.keys()),
+        help="Select players you want to guarantee are bought immediately."
+    )
+    forced_add_ids = [all_available_for_add[n] for n in forced_add_names]
 
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
@@ -517,9 +539,13 @@ if run_btn:
         top_candidates = available_players.sort_values('total_points', ascending=False).head(200)
         candidate_ids = set(top_candidates['id'].tolist())
         for pid in my_player_ids: candidate_ids.add(pid)
+        # Add forced ADD players to candidates
+        for pid in forced_add_ids: candidate_ids.add(pid)
         
         players_to_fetch = active_players[active_players['id'].isin(candidate_ids)]
         player_eps = {}
+        
+        owned_injured_pids = [] # Track injured players we own for forced selling
         
         for i, (index, player) in enumerate(players_to_fetch.iterrows()):
             if i % 20 == 0: progress_bar.progress(int((i / len(players_to_fetch)) * 90))
@@ -529,13 +555,15 @@ if run_btn:
             
             if pd.notna(chance) and chance < 50: 
                 is_doubtful = True
+                if pid in my_player_ids:
+                    owned_injured_pids.append(pid)
             
-            if pid in forced_keep_ids:
+            if pid in forced_keep_ids or pid in forced_add_ids:
                 is_doubtful = False
 
             avg = get_player_history_avg(pid)
             if avg is None or is_doubtful:
-                if pid in my_player_ids: avg = 0.0
+                if pid in my_player_ids or pid in forced_add_ids: avg = 0.0
                 else: continue
             player_eps[pid] = avg
 
@@ -654,6 +682,12 @@ if run_btn:
                     if (pid, d_idx) in roster_vars:
                          prob += roster_vars[(pid, d_idx)] == 0
 
+            # --- FORCE ADD CONSTRAINT (Manual) ---
+            for pid in forced_add_ids:
+                # Must be in roster on Day 0
+                if (pid, 0) in roster_vars:
+                     prob += roster_vars[(pid, 0)] == 1
+
             teams_list = elements['team'].unique()
             bc_players = [p for p in players_data if p['pos'] == "Back Court"]
             fc_players = [p for p in players_data if p['pos'] == "Front Court"]
@@ -687,9 +721,11 @@ if run_btn:
                         total_obj += starter_vars[(pid, d_idx)] * p['ep'] * game_prob
                         total_obj += captain_vars[(pid, d_idx)] * p['ep'] * game_prob
 
+            # Aggregated Constraints (Weekly)
             for w_data in weeks_schedule:
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
+                
                 if gw_indices:
                     week_transfers = []
                     for d_idx in gw_indices:
