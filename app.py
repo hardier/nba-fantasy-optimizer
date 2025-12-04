@@ -45,28 +45,12 @@ def get_firestore_db():
         return None
 
 def get_remote_ip():
-    """
-    Attempts to get the client IP address.
-    1. Tries X-Forwarded-For (Hosted/Cloud users).
-    2. Fallback to ipify (Local users running script).
-    """
-    # 1. Try Headers (Standard for Cloud/Hosted)
     try:
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if "X-Forwarded-For" in headers:
-                return headers["X-Forwarded-For"].split(",")[0].strip()
-    except Exception: 
-        pass
-
-    # 2. Fallback: External Service (For Localhost/LAN usage to get Network Public IP)
-    try:
-        response = requests.get("https://api.ipify.org", timeout=2)
-        if response.status_code == 200:
-            return response.text
-    except Exception:
-        pass
-    
+                return headers["X-Forwarded-For"].split(",")[0]
+    except Exception: pass
     return "Unknown/Local"
 
 def get_ip_location(ip):
@@ -240,6 +224,21 @@ def get_player_score_for_date(player_id, target_date):
             return h['total_points']
     return 0
 
+# --- NBA CUP PROBABILITY HELPERS ---
+def get_win_probability(team1_id, team2_id, teams_df):
+    try:
+        t1 = teams_df[teams_df['id'] == team1_id].iloc[0]
+        t2 = teams_df[teams_df['id'] == team2_id].iloc[0]
+        w1, l1 = t1.get('win', 0), t1.get('loss', 0)
+        w2, l2 = t2.get('win', 0), t2.get('loss', 0)
+        total1 = w1 + l1
+        rate1 = w1 / total1 if total1 > 0 else 0.5
+        total2 = w2 + l2
+        rate2 = w2 / total2 if total2 > 0 else 0.5
+        if rate1 + rate2 == 0: return 0.5
+        return rate1 / (rate1 + rate2)
+    except: return 0.5
+
 # --- ADMIN PAGE ---
 if st.query_params.get("admin") == "true":
     st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
@@ -271,7 +270,7 @@ if st.query_params.get("admin") == "true":
 st.title("🏀 NBA Fantasy Optimizer (Live)")
 st.markdown("Optimize lineup and transfers accounting for **Mid-Week Progress** across multiple weeks.")
 
-# 1. PRE-FETCH STATIC DATA (Required for Sidebar Logic)
+# 1. PRE-FETCH STATIC DATA
 bootstrap = fetch_bootstrap()
 if not bootstrap:
     st.error("Failed to fetch NBA Fantasy data. Please try again later.")
@@ -306,10 +305,8 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Simulation Mode")
     
-    # --- AUTO-DETECT GAME DAY ---
     default_sim = False
     default_day = 1
-    
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     gw_events = get_gameweek_event_range(bootstrap, gameweek_input)
     
@@ -335,11 +332,10 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # --- PRE-CALCULATE ROSTER FOR MANUAL DROP SELECTOR ---
+    # --- ROSTER PRE-CALC FOR SELECTORS ---
     roster_source_eid = None
     if gw_events:
         roster_source_eid = gw_events[0] - 1
-        fixtures_data = fetch_fixtures() 
         if fixtures_data:
             fixtures = pd.DataFrame(fixtures_data)
             gw_fixtures = fixtures[fixtures['event'].isin(gw_events)].copy()
@@ -362,7 +358,6 @@ with st.sidebar:
         team_data = fetch_picks(team_id_input, event_id=roster_source_eid)
         if not team_data:
              team_data = fetch_picks(team_id_input, roster_source_eid - 1)
-        
         if team_data:
             for p in team_data['picks']:
                 pid = p['element']
@@ -377,6 +372,13 @@ with st.sidebar:
         help="Select players you want to guarantee are sold immediately."
     )
     forced_drop_ids = [current_roster_names[n] for n in forced_drop_names]
+    
+    forced_keep_names = st.multiselect(
+        "Force KEEP (Ignore Injury/Low Chance):",
+        options=list(current_roster_names.keys()),
+        help="Select players you want to keep even if they are flagged as doubtful (<50% chance)."
+    )
+    forced_keep_ids = [current_roster_names[n] for n in forced_keep_names]
 
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
@@ -384,6 +386,9 @@ with st.sidebar:
 if run_btn:
     start_time = time.time()
     log_id = log_simulation_start(team_id_input, gameweek_input, weeks_to_optimize)
+    
+    # --- INIT SCORE VARIABLE EARLY TO PREVENT NAMEERROR ---
+    best_total_score = 0.0
     
     try:
         progress_bar = st.progress(0)
@@ -401,9 +406,7 @@ if run_btn:
             current_gw = gameweek_input + w
             ev_range = get_gameweek_event_range(bootstrap, current_gw)
             ev_range.sort()
-            if not ev_range:
-                st.warning(f"Could not find schedule for Gameweek {current_gw}. Stopping at week {w}.")
-                break
+            if not ev_range: break
             weeks_schedule.append({'gw': current_gw, 'events': ev_range})
             all_target_event_ids.extend(ev_range)
             for eid in ev_range: event_to_gw_map[eid] = current_gw
@@ -518,8 +521,6 @@ if run_btn:
         players_to_fetch = active_players[active_players['id'].isin(candidate_ids)]
         player_eps = {}
         
-        owned_injured_pids = [] # Track injured players we own for forced selling
-        
         for i, (index, player) in enumerate(players_to_fetch.iterrows()):
             if i % 20 == 0: progress_bar.progress(int((i / len(players_to_fetch)) * 90))
             pid = player['id']
@@ -528,20 +529,21 @@ if run_btn:
             
             if pd.notna(chance) and chance < 50: 
                 is_doubtful = True
-                if pid in my_player_ids:
-                    owned_injured_pids.append(pid)
             
+            if pid in forced_keep_ids:
+                is_doubtful = False
+
             avg = get_player_history_avg(pid)
             if avg is None or is_doubtful:
                 if pid in my_player_ids: avg = 0.0
                 else: continue
             player_eps[pid] = avg
 
-        # 7. Optimization LOOP
+        # 7. Optimization
         progress_bar.progress(95)
+        status_text.text("Optimizing strategy...")
         
-        teams_list = elements['team'].unique()
-        bc_players_all = [p for p in elements['id'] if elements.loc[elements['id']==p, 'position_name'].values[0] in ["Guard", "Back Court"]] # Logic handled in data prep below
+        prob = pulp.LpProblem("NBA_Fantasy_MultiWeek", pulp.LpMaximize)
         
         players_data = []
         for pid, ep in player_eps.items():
@@ -555,28 +557,74 @@ if run_btn:
                 'cost': effective_cost, 'current_val': p_row['now_cost'],
                 'pos': simple_pos, 'team': p_row['team'], 'ep': ep
             })
+        
+        # --- NBA CUP LOGIC ---
+        cup_team_map = {}
+        target_teams = ["MIA", "ORL", "NYK", "TOR", "PHX", "OKC", "SAS", "LAL"]
+        for t_code in target_teams:
+            row = teams[teams['short_name'] == t_code]
+            if not row.empty: cup_team_map[t_code] = row.iloc[0]['id']
+        
+        probs = {}
+        if len(cup_team_map) == 8:
+            p_a = get_win_probability(cup_team_map['MIA'], cup_team_map['ORL'], teams)
+            p_b = get_win_probability(cup_team_map['NYK'], cup_team_map['TOR'], teams)
+            p_c = get_win_probability(cup_team_map['PHX'], cup_team_map['OKC'], teams)
+            p_d = get_win_probability(cup_team_map['SAS'], cup_team_map['LAL'], teams)
             
-        player_schedule = {p['id']: set() for p in players_data}
+            probs['MIA_D6'] = p_a
+            probs['ORL_D6'] = 1 - p_a
+            probs['NYK_D6'] = p_b
+            probs['TOR_D6'] = 1 - p_b
+            probs['PHX_D6'] = p_c
+            probs['OKC_D6'] = 1 - p_c
+            probs['SAS_D6'] = p_d
+            probs['LAL_D6'] = 1 - p_d
+            
+            for t in target_teams:
+                probs[f"{t}_FINAL"] = probs[f"{t}_D6"] * 0.5
+
+        player_schedule = {p['id']: {} for p in players_data}
+        
         for _, f in gw_fixtures.iterrows():
             eid = f['event']
             if eid in event_id_to_solver_idx:
                 day_idx = event_id_to_solver_idx[eid]
                 for p in players_data:
                     if p['team'] == f['team_h'] or p['team'] == f['team_a']:
-                        player_schedule[p['id']].add(day_idx)
+                        player_schedule[p['id']][day_idx] = 1.0
+        
+        gw8_evs = get_gameweek_event_range(bootstrap, 8)
+        gw9_evs = get_gameweek_event_range(bootstrap, 9)
+        
+        if gw8_evs and len(gw8_evs) >= 6:
+            semi_final_eid = gw8_evs[5]
+            if semi_final_eid in event_id_to_solver_idx:
+                s_idx = event_id_to_solver_idx[semi_final_eid]
+                for p in players_data:
+                    t_code = p['team_short']
+                    if t_code in cup_team_map:
+                        prob_key = f"{t_code}_D6"
+                        if prob_key in probs:
+                            player_schedule[p['id']][s_idx] = probs[prob_key]
+
+        if gw9_evs and len(gw9_evs) >= 1:
+            final_eid = gw9_evs[0]
+            if final_eid in event_id_to_solver_idx:
+                f_idx = event_id_to_solver_idx[final_eid]
+                for p in players_data:
+                    t_code = p['team_short']
+                    if t_code in cup_team_map:
+                        prob_key = f"{t_code}_FINAL"
+                        if prob_key in probs:
+                            player_schedule[p['id']][f_idx] = probs[prob_key]
 
         num_future_days = len(future_event_ids)
-        
-        # OPTION GENERATION LOOP
         previous_solutions_constraints = []
-        
         option_tabs = st.tabs(["🏆 Option 1 (Best)", "🥈 Option 2", "🥉 Option 3"])
-        
-        best_total_score = 0 # To store for log
         
         for opt_idx in range(3):
             status_text.text(f"Calculating Option {opt_idx + 1}...")
-            
             prob = pulp.LpProblem(f"NBA_Fantasy_Opt_{opt_idx}", pulp.LpMaximize)
             roster_vars = {} 
             trans_in_vars = {}
@@ -589,7 +637,8 @@ if run_btn:
                     roster_vars[(pid, d_idx)] = pulp.LpVariable(f"R_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
                     trans_in_vars[(pid, d_idx)] = pulp.LpVariable(f"T_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
                     
-                    if d_idx in player_schedule[pid]:
+                    sched_prob = player_schedule[pid].get(d_idx, 0)
+                    if sched_prob > 0:
                         starter_vars[(pid, d_idx)] = pulp.LpVariable(f"S_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
                         captain_vars[(pid, d_idx)] = pulp.LpVariable(f"C_{pid}_{d_idx}", 0, 1, pulp.LpBinary)
 
@@ -600,7 +649,6 @@ if run_btn:
                 for d_idx in range(1, num_future_days):
                     prob += trans_in_vars[(pid, d_idx)] >= roster_vars[(pid, d_idx)] - roster_vars[(pid, d_idx-1)]
 
-            # --- FORCE DROP CONSTRAINT (Manual) ---
             for pid in forced_drop_ids:
                 for d_idx in range(num_future_days):
                     if (pid, d_idx) in roster_vars:
@@ -634,14 +682,14 @@ if run_btn:
                     if (pid, d_idx) in starter_vars:
                         prob += starter_vars[(pid, d_idx)] <= roster_vars[(pid, d_idx)]
                         prob += captain_vars[(pid, d_idx)] <= starter_vars[(pid, d_idx)]
-                        total_obj += starter_vars[(pid, d_idx)] * p['ep']
-                        total_obj += captain_vars[(pid, d_idx)] * p['ep']
+                        
+                        game_prob = player_schedule[pid].get(d_idx, 0)
+                        total_obj += starter_vars[(pid, d_idx)] * p['ep'] * game_prob
+                        total_obj += captain_vars[(pid, d_idx)] * p['ep'] * game_prob
 
-            # Aggregated Constraints (Weekly)
             for w_data in weeks_schedule:
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
-                
                 if gw_indices:
                     week_transfers = []
                     for d_idx in gw_indices:
@@ -689,7 +737,8 @@ if run_btn:
                         d_idx = event_id_to_solver_idx[eid]
                         for p in players_data:
                             if (p['id'], d_idx) in starter_vars and starter_vars[(p['id'], d_idx)].varValue > 0.5:
-                                pts = p['ep'] / 10.0
+                                game_prob = player_schedule[p['id']].get(d_idx, 0)
+                                pts = (p['ep'] / 10.0) * game_prob
                                 if (p['id'], d_idx) in captain_vars and captain_vars[(p['id'], d_idx)].varValue > 0.5:
                                     pts *= 2
                                 gw_total += pts
@@ -697,9 +746,9 @@ if run_btn:
 
             with option_tabs[opt_idx]:
                 cols = st.columns(len(gw_breakdown) + 1)
-                cols[0].metric("Total Score", f"{total_proj:.1f}")
+                cols[0].metric("Total Score (EV)", f"{total_proj:.1f}")
                 for i, (gw, score) in enumerate(gw_breakdown.items()):
-                    cols[i+1].metric(f"GW{gw}", f"{score:.1f}")
+                    cols[i+1].metric(f"GW{gw} EV", f"{score:.1f}")
                 
                 previous_roster_ids = set(my_player_ids)
                 
@@ -760,14 +809,26 @@ if run_btn:
                                         pid = p['id']
                                         status = "Bench"
                                         points = 0.0
+                                        
+                                        game_prob = player_schedule[p['id']].get(d_idx, 0)
+                                        
                                         if (pid, d_idx) in starter_vars and starter_vars[(pid, d_idx)].varValue > 0.5:
                                             status = "Starter"
-                                            points = p['ep'] / 10
+                                            points = (p['ep'] / 10.0) * game_prob
                                             if (pid, d_idx) in captain_vars and captain_vars[(pid, d_idx)].varValue > 0.5:
                                                 status = "CAPTAIN ⭐"
                                                 points *= 2
-                                        elif d_idx not in player_schedule[pid]: status = "No Game"
-                                        l_data.append({"Name": p['name'], "Team": p['team_short'], "Pos": p['pos'], "Role": status, "Exp Pts": f"{points:.1f}"})
+                                        elif game_prob == 0: status = "No Game"
+                                        
+                                        note = ""
+                                        if 0 < game_prob < 1:
+                                            note = f" ({int(game_prob*100)}% chance)"
+                                            
+                                        l_data.append({
+                                            "Name": p['name'], "Team": p['team_short'],
+                                            "Pos": p['pos'], "Value": f"{p['current_val']/10}m",
+                                            "Role": status, "Exp Pts": f"{points:.1f}{note}"
+                                        })
                                     
                                     df = pd.DataFrame(l_data)
                                     role_order = {"CAPTAIN ⭐": 0, "Starter": 1, "Bench": 2, "No Game": 3}
