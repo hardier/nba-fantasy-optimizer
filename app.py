@@ -45,53 +45,16 @@ def get_firestore_db():
         return None
 
 def get_remote_ip():
-    """
-    Robust strategy to get the client IP address.
-    1. Checks standard proxy headers (X-Forwarded-For).
-    2. Returns header IP (even if private) to distinguish LAN users.
-    3. Falls back to external API only if no headers found (Server IP).
-    """
-    ip = None
-    
-    # 1. Try Streamlit Headers (Works on Streamlit Cloud/Docker Proxies)
     try:
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if "X-Forwarded-For" in headers:
-                # Take first IP in list (Client IP)
-                ip = headers["X-Forwarded-For"].split(",")[0].strip()
-            elif "X-Real-IP" in headers:
-                ip = headers["X-Real-IP"].strip()
-    except Exception: 
-        pass
-
-    # 2. If Header IP found, return it (Prioritize individual device ID over Gateway IP)
-    if ip:
-        return ip
-        
-    # 3. Fallback: If NO headers (e.g. direct localhost), get Server Public IP
-    try:
-        response = requests.get("https://api.ipify.org", timeout=2)
-        if response.status_code == 200:
-            return response.text
-    except Exception:
-        pass
-    
+                return headers["X-Forwarded-For"].split(",")[0]
+    except Exception: pass
     return "Unknown/Local"
 
 def get_ip_location(ip):
-    """Resolves IP to location using free API, handles private IPs."""
-    # Check for Private/Local IPs to avoid API call waste
-    is_private = False
-    if not ip or ip in ["Unknown/Local", "localhost", "::1", "127.0.0.1"]: is_private = True
-    elif ip.startswith("10.") or ip.startswith("192.168."): is_private = True
-    elif ip.startswith("172."):
-        parts = ip.split(".")
-        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31: is_private = True
-        
-    if is_private:
-        return "Local Network"
-
+    if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]: return "Localhost"
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
         if response.status_code == 200:
@@ -234,7 +197,6 @@ def calculate_selling_price(purchase_price, now_cost):
 
 @st.cache_data(ttl=86400)
 def get_player_history_avg(player_id):
-    """Last 7 active games avg (points > 0)."""
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
@@ -242,16 +204,15 @@ def get_player_history_avg(player_id):
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
-    # Injury check
     if len(history) >= 2:
         m1 = int(history[0].get('minutes', 0))
         m2 = int(history[1].get('minutes', 0))
         if m1 == 0 and m2 == 0: return None
-    # Average calc using last 7 entries regardless of score
-    last_n = history[:7]
-    if not last_n: return 0.0
-    total_points = sum(g.get('total_points', 0) for g in last_n)
-    return total_points / len(last_n)
+    played_games = [g for g in history if g.get('total_points', 0) > 0]
+    last_5 = played_games[:5]
+    if not last_5: return 0.0
+    total_points = sum(g['total_points'] for g in last_5)
+    return total_points / len(last_5)
 
 def get_player_score_for_date(player_id, target_date):
     url = f"{BASE_URL}/element-summary/{player_id}/"
@@ -434,6 +395,17 @@ with st.sidebar:
         help="Select players you want to guarantee are bought immediately."
     )
     forced_add_ids = [all_available_for_add[n] for n in forced_add_names]
+    
+    # SELECTOR 4: FORCE EXCLUDE (NEW)
+    # Exclude options already selected in forced add
+    exclude_options = [name for name in all_available_for_add.keys() if name not in forced_add_names]
+    forced_exclude_names = st.multiselect(
+        "Force Exclude (Do Not Buy):",
+        options=exclude_options,
+        max_selections=3,
+        help="Select up to 3 players to strictly exclude from being transferred in."
+    )
+    forced_exclude_ids = [all_available_for_add[n] for n in forced_exclude_names]
 
     st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary")
@@ -572,10 +544,15 @@ if run_btn:
         for pid in my_player_ids: candidate_ids.add(pid)
         for pid in forced_add_ids: candidate_ids.add(pid)
         
+        # Filter out Force Excluded players from candidate pool
+        for pid in forced_exclude_ids:
+            if pid in candidate_ids:
+                candidate_ids.remove(pid)
+        
         players_to_fetch = active_players[active_players['id'].isin(candidate_ids)]
         player_eps = {}
         
-        owned_injured_pids = [] # Track injured players we own for forced selling
+        owned_injured_pids = [] 
         
         for i, (index, player) in enumerate(players_to_fetch.iterrows()):
             if i % 20 == 0: progress_bar.progress(int((i / len(players_to_fetch)) * 90))
