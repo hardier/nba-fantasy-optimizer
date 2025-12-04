@@ -55,13 +55,44 @@ def get_firestore_db():
         return None
 
 def get_remote_ip():
+    """
+    Robust strategy to get the client Public IP address.
+    1. Checks standard proxy headers (X-Forwarded-For, X-Real-IP).
+    2. Falls back to external API if running locally or headers fail.
+    """
+    ip = None
+    
+    # 1. Try Streamlit Headers (Works on Streamlit Cloud/Docker Proxies)
     try:
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if "X-Forwarded-For" in headers:
-                return headers["X-Forwarded-For"].split(",")[0]
-    except Exception: pass
-    return "Unknown/Local"
+                ip = headers["X-Forwarded-For"].split(",")[0].strip()
+            elif "X-Real-IP" in headers:
+                ip = headers["X-Real-IP"].strip()
+    except Exception: 
+        pass
+
+    # 2. Validate & Fallback
+    is_private = False
+    if not ip or ip in ["Unknown/Local", "localhost", "::1"]:
+        is_private = True
+    elif ip.startswith("127.") or ip.startswith("10.") or ip.startswith("192.168."):
+        is_private = True
+    elif ip.startswith("172."):
+        parts = ip.split(".")
+        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+            is_private = True
+
+    if is_private:
+        try:
+            response = requests.get("https://api.ipify.org", timeout=2)
+            if response.status_code == 200:
+                return response.text
+        except Exception:
+            pass
+            
+    return ip if ip else "Unknown/Local"
 
 def get_ip_location(ip):
     if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]: return "Localhost"
@@ -214,23 +245,37 @@ def calculate_selling_price(purchase_price, now_cost):
     return now_cost - fee
 
 @st.cache_data(ttl=86400)
-def get_player_history_avg(player_id):
+def get_player_history_avg(player_id, current_chance=None):
+    """
+    Calculates avg points for last 7 active games (points > 0).
+    Returns None if player is considered injured (0 mins in last 2 games),
+    UNLESS current_chance is explicitly 100 (returning from injury).
+    """
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
+    
     history = data.get('history', [])
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
+    
+    # Injury Check
     if len(history) >= 2:
         m1 = int(history[0].get('minutes', 0))
         m2 = int(history[1].get('minutes', 0))
-        if m1 == 0 and m2 == 0: return None
-    played_games = [g for g in history if g.get('total_points', 0) > 0]
-    last_5 = played_games[:5]
-    if not last_5: return 0.0
-    total_points = sum(g['total_points'] for g in last_5)
-    return total_points / len(last_5)
+        if m1 == 0 and m2 == 0:
+            # If strictly 100% chance, assume they are back and ignore recent absence
+            if current_chance is not None and current_chance == 100:
+                pass
+            else:
+                return None
+    
+    # Last 7 games regardless of score
+    last_n = history[:7]
+    if not last_n: return 0.0
+    total_points = sum(g.get('total_points', 0) for g in last_n)
+    return total_points / len(last_n)
 
 def get_player_score_for_date(player_id, target_date):
     url = f"{BASE_URL}/element-summary/{player_id}/"
@@ -605,7 +650,9 @@ if run_btn:
             
             if pid in forced_keep_ids or pid in forced_add_ids: is_doubtful = False
 
-            avg = get_player_history_avg(pid)
+            # Pass chance to the function to handle the "100% override" logic
+            avg = get_player_history_avg(pid, chance)
+            
             if avg is None or is_doubtful:
                 if pid in my_player_ids or pid in forced_add_ids: avg = 0.0
                 else: continue
