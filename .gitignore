@@ -4,6 +4,8 @@ nba_player_stats_cache.json
 pycache/
 *.pyc
 
+.streamlit/
+
 Ignore system files
 
 .DS_Store
