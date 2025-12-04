@@ -21,7 +21,6 @@ except ImportError:
 BASE_URL = "https://nbafantasy.nba.com/api"
 DEFAULT_TEAM_ID = 17
 DEFAULT_GAMEWEEK = 7
-# Note: ADMIN_PASSWORD is now securely loaded from st.secrets
 
 POSITIONS = {"Back Court": 5, "Front Court": 5}
 MAX_PLAYERS_PER_TEAM = 2
@@ -81,6 +80,7 @@ def init_local_db():
             team_id INTEGER,
             gameweek INTEGER,
             weeks_planned INTEGER,
+            user_options TEXT,
             status TEXT,
             duration_sec REAL,
             error_msg TEXT,
@@ -93,19 +93,23 @@ def init_local_db():
     if 'ip_address' not in cols: c.execute("ALTER TABLE logs ADD COLUMN ip_address TEXT")
     if 'location' not in cols: c.execute("ALTER TABLE logs ADD COLUMN location TEXT")
     if 'transfers' not in cols: c.execute("ALTER TABLE logs ADD COLUMN transfers TEXT")
+    if 'user_options' not in cols: c.execute("ALTER TABLE logs ADD COLUMN user_options TEXT")
     conn.commit()
     conn.close()
 
-def log_simulation_start(team_id, gw, weeks):
+def log_simulation_start(team_id, gw, weeks, options_dict):
     ts = get_pst_time()
     ip = get_remote_ip()
     loc = get_ip_location(ip)
+    options_str = json.dumps(options_dict)
+    
     db = get_firestore_db()
     if db:
         doc_ref = db.collection("logs").document()
         doc_ref.set({
             "timestamp": ts, "ip_address": ip, "location": loc,
             "team_id": team_id, "gameweek": gw, "weeks_planned": weeks,
+            "user_options": options_str,
             "status": "STARTED", "created_at": firestore.SERVER_TIMESTAMP
         })
         return doc_ref.id
@@ -113,8 +117,8 @@ def log_simulation_start(team_id, gw, weeks):
         init_local_db()
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
-        c.execute("INSERT INTO logs (timestamp, ip_address, location, team_id, gameweek, weeks_planned, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (ts, ip, loc, team_id, gw, weeks, 'STARTED'))
+        c.execute("INSERT INTO logs (timestamp, ip_address, location, team_id, gameweek, weeks_planned, user_options, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, ip, loc, team_id, gw, weeks, options_str, 'STARTED'))
         log_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -242,15 +246,14 @@ def get_win_probability(team1_id, team2_id, teams_df):
         return rate1 / (rate1 + rate2)
     except: return 0.5
 
-# --- ADMIN PAGE (SECURE) ---
+# --- ADMIN PAGE ---
 if st.query_params.get("admin") == "true":
     st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
     
-    # SECURE PASSWORD CHECK
     if "admin_password" not in st.secrets:
-        st.error("⚠️ Admin password not configured in Secrets. Access Denied.")
+        st.error("Admin password not configured in secrets. Please add 'admin_password' to your secrets.toml file.")
         st.stop()
-    
+        
     password = st.text_input("Enter Admin Password", type="password")
     
     if password == st.secrets["admin_password"]:
@@ -419,15 +422,25 @@ with st.sidebar:
 
 if run_btn:
     start_time = time.time()
-    log_id = log_simulation_start(team_id_input, gameweek_input, weeks_to_optimize)
+    
+    # Gather options for logging
+    user_opts = {
+        "simulation_mode": use_sim_mode,
+        "sim_game_day": sim_game_day if use_sim_mode else "Auto",
+        "safety_margin": safety_margin,
+        "forced_drop": forced_drop_names,
+        "forced_keep": forced_keep_names,
+        "forced_add": forced_add_names,
+        "forced_exclude": forced_exclude_names
+    }
+    
+    log_id = log_simulation_start(team_id_input, gameweek_input, weeks_to_optimize, user_opts)
     best_total_score = 0.0
     best_option_transfers = []
     
     try:
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
-        # Data already fetched above (bootstrap, active_players), reusing...
         
         # 2. Determine Schedule
         status_text.text(f"Building schedule for {weeks_to_optimize} weeks...")
@@ -727,7 +740,6 @@ if run_btn:
             for w_data in weeks_schedule:
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
-                
                 if gw_indices:
                     week_transfers = []
                     for d_idx in gw_indices:
@@ -789,6 +801,7 @@ if run_btn:
                     cols[i+1].metric(f"GW{gw} EV", f"{score:.1f}")
                 
                 previous_roster_ids = set(my_player_ids)
+                best_option_transfers = []
                 
                 for w_data in weeks_schedule:
                     gw_num = w_data['gw']
