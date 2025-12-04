@@ -261,8 +261,14 @@ def get_win_probability(team1_id, team2_id, teams_df):
 if st.query_params.get("admin") == "true":
     st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
     
-    if "admin_password" not in st.secrets:
-        st.error("Admin password not configured in secrets. Access Denied.")
+    # Robustly check for secrets to avoid crashing if file is missing
+    try:
+        if "admin_password" not in st.secrets:
+            st.error("⚠️ Admin password not configured in Secrets. Please add 'admin_password' to your secrets.toml file.")
+            st.stop()
+    except Exception:
+        st.error("⚠️ Secrets file not found. Create `.streamlit/secrets.toml` to set up admin access.")
+        st.info("Example content for secrets.toml:\n`admin_password = 'change_me'`")
         st.stop()
         
     password = st.text_input("Enter Admin Password", type="password")
@@ -799,7 +805,8 @@ if run_btn:
                         d_idx = event_id_to_solver_idx[eid]
                         for p in players_data:
                             if (p['id'], d_idx) in starter_vars and starter_vars[(p['id'], d_idx)].varValue > 0.5:
-                                pts = p['ep'] / 10.0
+                                game_prob = player_schedule[p['id']].get(d_idx, 0)
+                                pts = (p['ep'] / 10.0) * game_prob
                                 if (p['id'], d_idx) in captain_vars and captain_vars[(p['id'], d_idx)].varValue > 0.5:
                                     pts *= 2
                                 gw_total += pts
