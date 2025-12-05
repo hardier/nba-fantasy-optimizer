@@ -29,7 +29,6 @@ ROSTER_SIZE = 10
 
 st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide", page_icon="🏀")
 
-
 def get_firestore_db():
     if not FIREBASE_AVAILABLE: return None
     if "firebase" not in st.secrets: return None
@@ -43,16 +42,37 @@ def get_firestore_db():
         return None
 
 def get_remote_ip():
+    """
+    Robust strategy to get the client IP address.
+    Returns the IP seen by the server (may be private or public).
+    """
     try:
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if "X-Forwarded-For" in headers:
-                return headers["X-Forwarded-For"].split(",")[0]
+                # Take first IP in list (Client IP)
+                return headers["X-Forwarded-For"].split(",")[0].strip()
+            elif "X-Real-IP" in headers:
+                return headers["X-Real-IP"].strip()
     except Exception: pass
-    return "Unknown/Local"
+    
+    # Fallback for direct connections (returns public IP of the network)
+    try:
+        return requests.get("https://api.ipify.org", timeout=1).text
+    except:
+        return "Unknown/Local"
 
 def get_ip_location(ip):
     if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]: return "Localhost"
+    
+    is_private = False
+    if ip.startswith("10.") or ip.startswith("192.168."): is_private = True
+    elif ip.startswith("172."):
+        parts = ip.split(".")
+        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31: is_private = True
+        
+    if is_private: return "Local Network"
+
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
         if response.status_code == 200:
@@ -67,6 +87,16 @@ def get_pst_time():
     pst = utc - timedelta(hours=8)
     return pst.strftime("%Y-%m-%d %H:%M:%S PST")
 
+def get_current_session_id():
+    """Returns a unique ID for the current Streamlit session."""
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        ctx = get_script_run_ctx()
+        return ctx.session_id if ctx else "NO_SESSION_ID"
+    except Exception:
+        return "NO_SESSION_ID"
+
+
 def init_local_db():
     conn = sqlite3.connect('nba_fantasy_logs.db')
     c = conn.cursor()
@@ -76,6 +106,7 @@ def init_local_db():
             timestamp TEXT,
             ip_address TEXT,
             location TEXT,
+            session_id TEXT,
             team_id INTEGER,
             gameweek INTEGER,
             weeks_planned INTEGER,
@@ -93,6 +124,7 @@ def init_local_db():
     if 'location' not in cols: c.execute("ALTER TABLE logs ADD COLUMN location TEXT")
     if 'transfers' not in cols: c.execute("ALTER TABLE logs ADD COLUMN transfers TEXT")
     if 'user_options' not in cols: c.execute("ALTER TABLE logs ADD COLUMN user_options TEXT")
+    if 'session_id' not in cols: c.execute("ALTER TABLE logs ADD COLUMN session_id TEXT")
     conn.commit()
     conn.close()
 
@@ -100,13 +132,14 @@ def log_simulation_start(team_id, gw, weeks, options_dict):
     ts = get_pst_time()
     ip = get_remote_ip()
     loc = get_ip_location(ip)
+    sid = get_current_session_id()
     options_str = json.dumps(options_dict)
     
     db = get_firestore_db()
     if db:
         doc_ref = db.collection("logs").document()
         doc_ref.set({
-            "timestamp": ts, "ip_address": ip, "location": loc,
+            "timestamp": ts, "ip_address": ip, "location": loc, "session_id": sid,
             "team_id": team_id, "gameweek": gw, "weeks_planned": weeks,
             "user_options": options_str,
             "status": "STARTED", "created_at": firestore.SERVER_TIMESTAMP
@@ -116,8 +149,8 @@ def log_simulation_start(team_id, gw, weeks, options_dict):
         init_local_db()
         conn = sqlite3.connect('nba_fantasy_logs.db')
         c = conn.cursor()
-        c.execute("INSERT INTO logs (timestamp, ip_address, location, team_id, gameweek, weeks_planned, user_options, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (ts, ip, loc, team_id, gw, weeks, options_str, 'STARTED'))
+        c.execute("INSERT INTO logs (timestamp, ip_address, location, session_id, team_id, gameweek, weeks_planned, user_options, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, ip, loc, sid, team_id, gw, weeks, options_str, 'STARTED'))
         log_id = c.lastrowid
         conn.commit()
         conn.close()
@@ -320,7 +353,7 @@ with st.sidebar:
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
     
     # Quick Sim Option
-    play_wildcard = st.checkbox("Play Wildcard (Unlimited Transfers on starting Day)?", value=False, help="Activate this if you plan to play your Wildcard chip. This gives unlimited transfers for the FIRST day of the simulation, but normal limits apply for the rest of the week.")
+    play_wildcard = st.checkbox("Play Wildcard (Unlimited Transfers)?", value=False, help="Activate this if you plan to play your Wildcard chip. This gives unlimited transfers for the FIRST day of the simulation, but normal limits apply for the rest of the week.")
     quick_sim = st.checkbox("Quick Sim (Best Option Only)", value=False)
     
     st.markdown("---")
@@ -838,9 +871,6 @@ if run_btn:
                     cols[i+1].metric(f"GW{gw} EV", f"{score:.1f}")
                 
                 previous_roster_ids = set(my_player_ids)
-                
-                # We collect transfers for Option 1 here
-                current_option_transfers = []
                 
                 for w_data in weeks_schedule:
                     gw_num = w_data['gw']
