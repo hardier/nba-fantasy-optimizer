@@ -29,17 +29,6 @@ ROSTER_SIZE = 10
 
 st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide", page_icon="🏀")
 
-# --- HIDE STREAMLIT BRANDING & GITHUB LINKS ---
-st.markdown("""
-    <style>
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        header {visibility: hidden;}
-        .stDeployButton {display:none;}
-        [data-testid="stToolbar"] {visibility: hidden !important;}
-    </style>
-""", unsafe_allow_html=True)
-
 # --- DATABASE & LOGGING FUNCTIONS ---
 
 def get_firestore_db():
@@ -55,44 +44,13 @@ def get_firestore_db():
         return None
 
 def get_remote_ip():
-    """
-    Robust strategy to get the client Public IP address.
-    1. Checks standard proxy headers (X-Forwarded-For, X-Real-IP).
-    2. Falls back to external API if running locally or headers fail.
-    """
-    ip = None
-    
-    # 1. Try Streamlit Headers (Works on Streamlit Cloud/Docker Proxies)
     try:
         if hasattr(st, "context") and hasattr(st.context, "headers"):
             headers = st.context.headers
             if "X-Forwarded-For" in headers:
-                ip = headers["X-Forwarded-For"].split(",")[0].strip()
-            elif "X-Real-IP" in headers:
-                ip = headers["X-Real-IP"].strip()
-    except Exception: 
-        pass
-
-    # 2. Validate & Fallback
-    is_private = False
-    if not ip or ip in ["Unknown/Local", "localhost", "::1"]:
-        is_private = True
-    elif ip.startswith("127.") or ip.startswith("10.") or ip.startswith("192.168."):
-        is_private = True
-    elif ip.startswith("172."):
-        parts = ip.split(".")
-        if len(parts) > 1 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
-            is_private = True
-
-    if is_private:
-        try:
-            response = requests.get("https://api.ipify.org", timeout=2)
-            if response.status_code == 200:
-                return response.text
-        except Exception:
-            pass
-            
-    return ip if ip else "Unknown/Local"
+                return headers["X-Forwarded-For"].split(",")[0]
+    except Exception: pass
+    return "Unknown/Local"
 
 def get_ip_location(ip):
     if ip in ["Unknown/Local", "127.0.0.1", "localhost", "::1"]: return "Localhost"
@@ -245,37 +203,23 @@ def calculate_selling_price(purchase_price, now_cost):
     return now_cost - fee
 
 @st.cache_data(ttl=86400)
-def get_player_history_avg(player_id, current_chance=None):
-    """
-    Calculates avg points for last 7 active games (points > 0).
-    Returns None if player is considered injured (0 mins in last 2 games),
-    UNLESS current_chance is explicitly 100 (returning from injury).
-    """
+def get_player_history_avg(player_id):
     url = f"{BASE_URL}/element-summary/{player_id}/"
     data = fetch_json(url)
     if not data: return 0.0
-    
     history = data.get('history', [])
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     history = [h for h in history if h['kickoff_time'][:10] < today_str]
     history.sort(key=lambda x: x['kickoff_time'], reverse=True)
-    
-    # Injury Check
     if len(history) >= 2:
         m1 = int(history[0].get('minutes', 0))
         m2 = int(history[1].get('minutes', 0))
-        if m1 == 0 and m2 == 0:
-            # If strictly 100% chance, assume they are back and ignore recent absence
-            if current_chance is not None and current_chance == 100:
-                pass
-            else:
-                return None
-    
-    # Last 7 games regardless of score
-    last_n = history[:7]
-    if not last_n: return 0.0
-    total_points = sum(g.get('total_points', 0) for g in last_n)
-    return total_points / len(last_n)
+        if m1 == 0 and m2 == 0: return None
+    played_games = [g for g in history if g.get('total_points', 0) > 0]
+    last_5 = played_games[:5]
+    if not last_5: return 0.0
+    total_points = sum(g['total_points'] for g in last_5)
+    return total_points / len(last_5)
 
 def get_player_score_for_date(player_id, target_date):
     url = f"{BASE_URL}/element-summary/{player_id}/"
@@ -369,13 +313,15 @@ elements['full_name'] = elements['first_name'] + " " + elements['second_name']
 
 active_players = elements[elements['status'] != 'u'].copy()
 
-# SIDEBAR
+# --- SIDEBAR SETTINGS ---
 with st.sidebar:
     st.header("Settings")
     team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
     gameweek_input = st.number_input("Start Gameweek", value=DEFAULT_GAMEWEEK, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
+    
+    quick_sim = st.checkbox("Quick Sim (Best Option Only)", value=False)
     
     st.markdown("---")
     st.caption("Simulation Mode")
@@ -450,43 +396,44 @@ with st.sidebar:
             all_available_for_add[name_label] = row['id']
 
     forced_drop_names = st.multiselect(
-        "Force Transfer Out (Start of Sim):",
+        "Force Transfer Out:",
         options=list(current_roster_names.keys()),
         help="Select players you want to guarantee are sold immediately."
     )
     forced_drop_ids = [current_roster_names[n] for n in forced_drop_names]
-    
-    forced_keep_names = st.multiselect(
-        "Force KEEP (Ignore Injury/Low Chance):",
-        options=list(current_roster_names.keys()),
-        help="Select players you want to keep even if they are flagged as doubtful (<50% chance)."
-    )
-    forced_keep_ids = [current_roster_names[n] for n in forced_keep_names]
-    
+
     forced_add_names = st.multiselect(
-        "Force Transfer In (Start of Sim):",
+        "Force Transfer In:",
         options=list(all_available_for_add.keys()),
         help="Select players you want to guarantee are bought immediately."
     )
     forced_add_ids = [all_available_for_add[n] for n in forced_add_names]
-    
-    exclude_options = [name for name in all_available_for_add.keys() if name not in forced_add_names]
+
     forced_exclude_names = st.multiselect(
         "Force Exclude (Do Not Buy):",
-        options=exclude_options,
+        # Use .keys() directly on all_available_for_add since forced_add_names exists now
+        options=[name for name in all_available_for_add.keys() if name not in forced_add_names], 
         max_selections=3,
         help="Select up to 3 players to strictly exclude from being transferred in."
     )
     forced_exclude_ids = [all_available_for_add[n] for n in forced_exclude_names]
+    
+    forced_keep_names = st.multiselect(
+        "Force KEEP (Ignore Injury):",
+        options=list(current_roster_names.keys()),
+        help="Select players you want to keep even if they are flagged as doubtful."
+    )
+    forced_keep_ids = [current_roster_names[n] for n in forced_keep_names]
 
-    st.markdown("---")
-    run_btn = st.button("RUN OPTIMIZATION", type="primary")
+    st.markdown("###")
+    run_btn = st.button("RUN OPTIMIZATION", type="primary", use_container_width=True)
 
 if run_btn:
     start_time = time.time()
     
     # Gather options for logging
     user_opts = {
+        "quick_sim": quick_sim,
         "simulation_mode": use_sim_mode,
         "sim_game_day": sim_game_day if use_sim_mode else "Auto",
         "safety_margin": safety_margin,
@@ -650,9 +597,7 @@ if run_btn:
             
             if pid in forced_keep_ids or pid in forced_add_ids: is_doubtful = False
 
-            # Pass chance to the function to handle the "100% override" logic
-            avg = get_player_history_avg(pid, chance)
-            
+            avg = get_player_history_avg(pid)
             if avg is None or is_doubtful:
                 if pid in my_player_ids or pid in forced_add_ids: avg = 0.0
                 else: continue
@@ -734,9 +679,16 @@ if run_btn:
 
         num_future_days = len(future_event_ids)
         previous_solutions_constraints = []
-        option_tabs = st.tabs(["🏆 Option 1 (Best)", "🥈 Option 2", "🥉 Option 3"])
         
-        for opt_idx in range(3):
+        # Determine loop count based on Quick Sim
+        loop_count = 1 if quick_sim else 3
+        tab_labels = ["🏆 Option 1 (Best)"]
+        if not quick_sim:
+            tab_labels.extend(["🥈 Option 2", "🥉 Option 3"])
+            
+        option_tabs = st.tabs(tab_labels)
+        
+        for opt_idx in range(loop_count):
             status_text.text(f"Calculating Option {opt_idx + 1}...")
             prob = pulp.LpProblem(f"NBA_Fantasy_Opt_{opt_idx}", pulp.LpMaximize)
             roster_vars = {} 
