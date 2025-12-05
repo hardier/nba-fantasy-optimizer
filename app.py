@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import pulp
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import math
 import sqlite3
 import json
@@ -196,7 +196,7 @@ def fetch_picks(team_id, event_id):
 
 def calculate_selling_price(purchase_price, now_cost):
     if now_cost <= purchase_price: return now_cost
-    profit = now_cost - purchase_price
+    profit = now_cost - purchase_cost
     fee = math.ceil(profit / 2)
     return now_cost - fee
 
@@ -327,28 +327,45 @@ with st.sidebar:
     
     default_sim = False
     default_day = 1
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    current_utc = datetime.now(timezone.utc)
     gw_events = get_gameweek_event_range(bootstrap, gameweek_input)
     
+    # --- CALCULATE DEFAULT START DAY (DEADLINE-BASED) ---
+    current_game_day_index = 0
     if gw_events:
-        gw_events.sort()
         fixtures_data = fetch_fixtures()
         if fixtures_data:
             fx = pd.DataFrame(fixtures_data)
-            subset = fx[fx['event'].isin(gw_events)]
-            for i, eid in enumerate(gw_events):
-                ev_games = subset[subset['event'] == eid]
+            
+            day_counter = 1
+            for eid in gw_events:
+                ev_games = fx[fx['event'] == eid]
                 if not ev_games.empty:
-                    e_date = ev_games.iloc[0]['kickoff_time'][:10]
-                    if e_date == today_str:
-                        day_num = i + 1
-                        if day_num >= 2:
-                            default_sim = True
-                            default_day = day_num
+                    # Use the earliest kickoff time for the deadline check
+                    kickoff_time_str = ev_games['kickoff_time'].min()
+                    
+                    # Convert kickoff time string to UTC datetime object
+                    kickoff_time_utc = datetime.strptime(kickoff_time_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+                    
+                    if current_utc > kickoff_time_utc:
+                        # This day is over (past the deadline), check next one
+                        day_num = day_counter + 1
+                    else:
+                        # This is the current active day
+                        default_day = day_counter
                         break
+                    
+                    day_counter += 1
+            
+            if default_day > len(gw_events): # If all events are passed
+                default_day = len(gw_events)
+                default_sim = True
+            elif default_day > 1:
+                default_sim = True
+
 
     use_sim_mode = st.checkbox("Simulate specific Game Day?", value=default_sim)
-    sim_game_day = st.number_input("Current Game Day of start Gameweek (1-7)", min_value=1, max_value=7, value=default_day, disabled=not use_sim_mode)
+    sim_game_day = st.number_input("Current Game Day of start Gameweek (1-7)", min_value=1, max_value=len(gw_events), value=default_day, disabled=not use_sim_mode)
     
     st.markdown("---")
     
@@ -565,7 +582,7 @@ if run_btn:
         c1.metric("Banked Points (GW1)", f"{banked_points_total:.1f}")
         
         t_val = transfers_limit_map[weeks_schedule[0]['gw']]
-        t_display = f"∞ (Day 1) / {t_val} (Rest)" if play_wildcard else t_val
+        t_display = f"∞ (WC Day) / {t_val} (Rest)" if play_wildcard else t_val
         c2.metric("Transfers Left (GW1)", t_display)
         
         c3.metric("Budget", f"{total_budget_safe/10}m")
@@ -769,6 +786,7 @@ if run_btn:
             # Aggregated Constraints (Weekly)
             for w_idx, w_data in enumerate(weeks_schedule):
                 gw_num = w_data['gw']
+                gw_events = w_data['events']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
                 
                 if gw_indices:
@@ -778,8 +796,14 @@ if run_btn:
                     gw_indices.sort()
                     
                     for d_idx in gw_indices:
-                        # Transfers on the WC day (first future day) do NOT count towards the weekly limit
-                        if is_wildcard_week and d_idx == gw_indices[0]: 
+                        # Transfers on the WC day do NOT count towards the weekly limit
+                        # WC Day Index = gw_indices[0] (start index of future events) + (sim_game_day - 1)
+                        wc_day_index_local = sim_game_day - 1
+                        
+                        # Calculate the solver index for the chosen WC day
+                        wc_day_solver_idx = gw_indices[0] + wc_day_index_local
+                        
+                        if is_wildcard_week and d_idx == wc_day_solver_idx: 
                             continue
                             
                         day_trans_vars = [trans_in_vars[(p['id'], d_idx)] for p in players_data]
