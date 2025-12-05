@@ -29,7 +29,6 @@ ROSTER_SIZE = 10
 
 st.set_page_config(page_title="NBA Fantasy Optimizer", layout="wide", page_icon="🏀")
 
-# --- DATABASE & LOGGING FUNCTIONS ---
 
 def get_firestore_db():
     if not FIREBASE_AVAILABLE: return None
@@ -250,10 +249,9 @@ def get_win_probability(team1_id, team2_id, teams_df):
 if st.query_params.get("admin") == "true":
     st.title("🔒 NBA Fantasy Optimizer - Admin Panel")
     
-    # Robustly check for secrets to avoid crashing if file is missing
     try:
         if "admin_password" not in st.secrets:
-            st.error("⚠️ Admin password not configured in Secrets. Please add 'admin_password' to your secrets.toml file.")
+            st.error("⚠️ Admin password not configured in Secrets. Access Denied.")
             st.stop()
     except Exception:
         st.error("⚠️ Secrets file not found. Create `.streamlit/secrets.toml` to set up admin access.")
@@ -313,7 +311,7 @@ elements['full_name'] = elements['first_name'] + " " + elements['second_name']
 
 active_players = elements[elements['status'] != 'u'].copy()
 
-# --- SIDEBAR SETTINGS ---
+# SIDEBAR
 with st.sidebar:
     st.header("Settings")
     team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
@@ -321,6 +319,8 @@ with st.sidebar:
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
     
+    # Quick Sim Option
+    play_wildcard = st.checkbox("Play Wildcard (Unlimited Transfers on starting Day)?", value=False, help="Activate this if you plan to play your Wildcard chip. This gives unlimited transfers for the FIRST day of the simulation, but normal limits apply for the rest of the week.")
     quick_sim = st.checkbox("Quick Sim (Best Option Only)", value=False)
     
     st.markdown("---")
@@ -401,31 +401,31 @@ with st.sidebar:
         help="Select players you want to guarantee are sold immediately."
     )
     forced_drop_ids = [current_roster_names[n] for n in forced_drop_names]
-
+    
+    forced_keep_names = st.multiselect(
+        "Force KEEP (Ignore Injury/Low Chance):",
+        options=list(current_roster_names.keys()),
+        help="Select players you want to keep even if they are flagged as doubtful (<50% chance)."
+    )
+    forced_keep_ids = [current_roster_names[n] for n in forced_keep_names]
+    
     forced_add_names = st.multiselect(
         "Force Transfer In:",
         options=list(all_available_for_add.keys()),
         help="Select players you want to guarantee are bought immediately."
     )
     forced_add_ids = [all_available_for_add[n] for n in forced_add_names]
-
+    
+    exclude_options = [name for name in all_available_for_add.keys() if name not in forced_add_names]
     forced_exclude_names = st.multiselect(
         "Force Exclude (Do Not Buy):",
-        # Use .keys() directly on all_available_for_add since forced_add_names exists now
-        options=[name for name in all_available_for_add.keys() if name not in forced_add_names], 
+        options=exclude_options,
         max_selections=3,
         help="Select up to 3 players to strictly exclude from being transferred in."
     )
     forced_exclude_ids = [all_available_for_add[n] for n in forced_exclude_names]
-    
-    forced_keep_names = st.multiselect(
-        "Force KEEP (Ignore Injury):",
-        options=list(current_roster_names.keys()),
-        help="Select players you want to keep even if they are flagged as doubtful."
-    )
-    forced_keep_ids = [current_roster_names[n] for n in forced_keep_names]
 
-    st.markdown("###")
+    st.markdown("---")
     run_btn = st.button("RUN OPTIMIZATION", type="primary", use_container_width=True)
 
 if run_btn:
@@ -433,6 +433,7 @@ if run_btn:
     
     # Gather options for logging
     user_opts = {
+        "wildcard": play_wildcard,
         "quick_sim": quick_sim,
         "simulation_mode": use_sim_mode,
         "sim_game_day": sim_game_day if use_sim_mode else "Auto",
@@ -530,7 +531,11 @@ if run_btn:
         transfers_limit_map = {}
         for i, w_data in enumerate(weeks_schedule):
             gw_num = w_data['gw']
-            limit = max(0, TRANSFERS_ALLOWED - transfers_used_w1) if i == 0 else TRANSFERS_ALLOWED
+            if i == 0:
+                # Limit for Week 1 (Used for non-WC days)
+                limit = max(0, TRANSFERS_ALLOWED - transfers_used_w1)
+            else:
+                limit = TRANSFERS_ALLOWED
             transfers_limit_map[gw_num] = limit
 
         # 5. Fetch Initial Roster
@@ -559,7 +564,11 @@ if run_btn:
         
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Banked Points (GW1)", f"{banked_points_total:.1f}")
-        c2.metric("Transfers Left (GW1)", transfers_limit_map[weeks_schedule[0]['gw']])
+        
+        t_val = transfers_limit_map[weeks_schedule[0]['gw']]
+        t_display = f"∞ (Day 1) / {t_val} (Rest)" if play_wildcard else t_val
+        c2.metric("Transfers Left (GW1)", t_display)
+        
         c3.metric("Budget", f"{total_budget_safe/10}m")
         c4.metric("Optimize Days", len(future_event_ids))
 
@@ -754,15 +763,27 @@ if run_btn:
                         total_obj += captain_vars[(pid, d_idx)] * p['ep'] * game_prob
 
             # Aggregated Constraints (Weekly)
-            for w_data in weeks_schedule:
+            for w_idx, w_data in enumerate(weeks_schedule):
                 gw_num = w_data['gw']
                 gw_indices = [event_id_to_solver_idx[eid] for eid in w_data['events'] if eid in event_id_to_solver_idx]
+                
                 if gw_indices:
-                    week_transfers = []
+                    week_transfers_vars = []
+                    is_wildcard_week = (w_idx == 0 and play_wildcard)
+                    
+                    gw_indices.sort()
+                    
                     for d_idx in gw_indices:
+                        # Wildcard logic: Transfers on the WC day do NOT count towards the weekly limit
+                        if is_wildcard_week and d_idx == gw_indices[0]: 
+                            continue
+                            
                         day_trans_vars = [trans_in_vars[(p['id'], d_idx)] for p in players_data]
-                        week_transfers.extend(day_trans_vars)
-                    prob += pulp.lpSum(week_transfers) <= transfers_limit_map[gw_num]
+                        week_transfers_vars.extend(day_trans_vars)
+                    
+                    # Limit applies to the sum of non-WC day transfers
+                    limit = transfers_limit_map[gw_num]
+                    prob += pulp.lpSum(week_transfers_vars) <= limit, f"TransLimit_GW{gw_num}"
                     
                     week_captains = []
                     for d_idx in gw_indices:
@@ -804,8 +825,7 @@ if run_btn:
                         d_idx = event_id_to_solver_idx[eid]
                         for p in players_data:
                             if (p['id'], d_idx) in starter_vars and starter_vars[(p['id'], d_idx)].varValue > 0.5:
-                                game_prob = player_schedule[p['id']].get(d_idx, 0)
-                                pts = (p['ep'] / 10.0) * game_prob
+                                pts = p['ep'] / 10.0
                                 if (p['id'], d_idx) in captain_vars and captain_vars[(p['id'], d_idx)].varValue > 0.5:
                                     pts *= 2
                                 gw_total += pts
@@ -818,7 +838,9 @@ if run_btn:
                     cols[i+1].metric(f"GW{gw} EV", f"{score:.1f}")
                 
                 previous_roster_ids = set(my_player_ids)
-                best_option_transfers = []
+                
+                # We collect transfers for Option 1 here
+                current_option_transfers = []
                 
                 for w_data in weeks_schedule:
                     gw_num = w_data['gw']
