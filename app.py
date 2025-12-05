@@ -727,6 +727,11 @@ if run_btn:
 
             for pid in forced_add_ids:
                 if (pid, 0) in roster_vars: prob += roster_vars[(pid, 0)] == 1
+            
+            for pid in forced_keep_ids:
+                if pid in my_player_ids:
+                    for d_idx in range(num_future_days):
+                        if (pid, d_idx) in roster_vars: prob += roster_vars[(pid, d_idx)] == 1
 
             teams_list = elements['team'].unique()
             bc_players = [p for p in players_data if p['pos'] == "Back Court"]
@@ -773,15 +778,16 @@ if run_btn:
                     gw_indices.sort()
                     
                     for d_idx in gw_indices:
-                        # Wildcard logic: Transfers on the WC day do NOT count towards the weekly limit
+                        # Transfers on the WC day (first future day) do NOT count towards the weekly limit
                         if is_wildcard_week and d_idx == gw_indices[0]: 
                             continue
                             
                         day_trans_vars = [trans_in_vars[(p['id'], d_idx)] for p in players_data]
                         week_transfers_vars.extend(day_trans_vars)
                     
-                    # Limit applies to the sum of non-WC day transfers
+                    # Limit applies to the sum of non-WC day transfers (which is the standard limit)
                     limit = transfers_limit_map[gw_num]
+                    
                     prob += pulp.lpSum(week_transfers_vars) <= limit, f"TransLimit_GW{gw_num}"
                     
                     week_captains = []
@@ -837,9 +843,6 @@ if run_btn:
                     cols[i+1].metric(f"GW{gw} EV", f"{score:.1f}")
                 
                 previous_roster_ids = set(my_player_ids)
-                
-                # --- CAPTURE TRANSFERS ---
-                current_option_transfers = []
                 
                 for w_data in weeks_schedule:
                     gw_num = w_data['gw']
