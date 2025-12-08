@@ -19,8 +19,8 @@ except ImportError:
 
 # --- CONFIGURATION ---
 BASE_URL = "https://nbafantasy.nba.com/api"
-DEFAULT_TEAM_ID = 17
-DEFAULT_GAMEWEEK = 7
+DEFAULT_TEAM_ID = 1
+DEFAULT_GAMEWEEK = 8
 
 POSITIONS = {"Back Court": 5, "Front Court": 5}
 MAX_PLAYERS_PER_TEAM = 2
@@ -377,6 +377,7 @@ with st.sidebar:
             fixtures = pd.DataFrame(fixtures_data)
             gw_fixtures = fixtures[fixtures['event'].isin(gw_events)].copy()
             event_dates = {}
+            today_str = datetime.utcnow().strftime("%Y-%m-%d")
             for eid in gw_events:
                 f = gw_fixtures[gw_fixtures['event'] == eid]
                 if not f.empty: event_dates[eid] = f.iloc[0]['kickoff_time'][:10]
