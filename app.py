@@ -301,7 +301,7 @@ if st.query_params.get("admin") == "true":
                 day_logs = logs_df[logs_df['date_group'] == d]
                 count = len(day_logs)
                 with st.expander(f"📅 {d} ({count} logs)", expanded=(d == unique_dates[0])):
-                    st.dataframe(logs_df[['timestamp', 'ip_address', 'location', 'team_id', 'gameweek', 'transfers', 'result_summary', 'user_options']], width='stretch', hide_index=True)
+                    st.dataframe(logs_df[['timestamp', 'ip_address', 'location', 'team_id', 'gameweek', 'weeks_planned', 'user_options', 'status', 'duration_sec', 'error_msg', 'result_summary', 'transfers']], width='stretch', hide_index=True)
             st.markdown("---")
             csv = logs_df.to_csv(index=False)
             st.download_button("Download All Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
@@ -463,7 +463,8 @@ with st.sidebar:
     
     # Quick Sim Option
     play_wildcard = st.checkbox("Play Wildcard (Unlimited Transfers)?", value=False, help="Activate this if you plan to play your Wildcard chip. This gives unlimited transfers for the FIRST day of the simulation, but normal limits apply for the rest of the week.")
-    quick_sim = st.checkbox("Quick Sim (Best Option Only)", value=False)
+    
+    quick_sim = False # Default to False since checkbox is removed
     
     st.markdown("---")
     st.caption("Simulation Mode")
@@ -822,11 +823,10 @@ if run_btn:
         previous_solutions_constraints = []
         
         # Determine loop count based on Quick Sim
-        loop_count = 1 if quick_sim else 3
-        tab_labels = ["🏆 Option 1 (Best)"]
-        if not quick_sim:
-            tab_labels.extend(["🥈 Option 2", "🥉 Option 3"])
-            
+        # FIX: Loop count is now 1 (removed quick_sim logic)
+        loop_count = 1
+        tab_labels = ["🏆 Optimal Strategy"]
+        
         option_tabs = st.tabs(tab_labels)
         
         for opt_idx in range(loop_count):
@@ -1076,10 +1076,20 @@ if run_btn:
                                     st.dataframe(df.sort_values('sort').drop('sort', axis=1), width='stretch', hide_index=True)
 
         transfers_str = "; ".join(best_option_transfers)
+        
+        # SUCCESS cleanup
+        progress_bar.progress(100) # Ensure it hits 100%
+        status_text.empty()       # Clear the status text
+        st.success(f"Optimization Complete! Projected Score: {total_proj:.1f}") # Add success message
+        
         log_simulation_end(log_id, 'SUCCESS', time.time()-start_time, result_summary=f"Score: {best_total_score:.1f}", transfers=transfers_str)
         
     except Exception as e:
         friendly_error = str(e)
+        
+        # ERROR cleanup
+        progress_bar.empty() # Clear the progress bar on error
+        status_text.empty()
              
         log_simulation_end(log_id, 'ERROR', time.time()-start_time, error_msg=friendly_error)
         st.error(f"An error occurred: {friendly_error}")
