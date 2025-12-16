@@ -218,7 +218,7 @@ def fetch_picks(team_id, event_id):
         
     if not data or 'picks' not in data:
         # Return empty structure if fetching fails completely
-        return {'picks': [], 'entry_history': {'bank': 0}}
+        return {'picks': [], 'entry_history': {'bank': 0}, 'active_chip': None} # Added active_chip for safe access
         
     return data
 
@@ -498,47 +498,67 @@ with st.sidebar:
     st.markdown("---")
     
     # --- ROSTER PRE-CALC FOR SELECTORS ---
-    # Need events list for the currently SELECTED Gameweek input (gameweek_input)
+    
     gw_events_selected = get_gameweek_event_range(bootstrap, gameweek_input)
     
     roster_source_eid = None
-    if gw_events_selected:
-        roster_source_eid = gw_events_selected[0] - 1
-        
-        # Determine current roster based on selected sim day or auto detection
-        if fixtures_data is not None and not fixtures_data.empty:
-            fixtures = fixtures_data
-            gw_fixtures = fixtures[fixtures['event'].isin(gw_events_selected)].copy()
-            event_dates = {}
-            today_str = datetime.utcnow().strftime("%Y-%m-%d")
-            
-            for eid in gw_events_selected:
-                f = gw_fixtures[fixtures['event'] == eid]
-                if not f.empty: event_dates[eid] = f.iloc[0]['kickoff_time'][:10]
-                else: event_dates[eid] = "9999"
-            
-            if use_sim_mode:
-                split_idx = sim_game_day - 1
-                past_eids = gw_events_selected[:split_idx]
-                if past_eids: roster_source_eid = past_eids[-1]
-            else:
-                past_eids = [eid for eid in gw_events_selected if event_dates.get(eid, "9999") < today_str]
-                if past_eids: roster_source_eid = past_eids[-1]
-
-    current_roster_names = {}
-    current_roster_ids_set = set()
     
-    # Ensure roster_source_eid is valid (default to start of GW if no past events found)
-    if not roster_source_eid and gw_events_selected:
-        roster_source_eid = gw_events_selected[0] - 1
+    # 1. Determine the event ID immediately preceding the target Gameweek start
+    pre_gw_start_eid = gw_events_selected[0] - 1
+    
+    # Initialize roster source to the pre-GW roster
+    roster_source_eid = pre_gw_start_eid
+    
+    # 2. Fetch the roster data for the immediate pre-Gameweek event
+    my_team_pre_gw_data = fetch_picks(team_id_input, event_id=pre_gw_start_eid)
+    
+    # --- CHIP LOGIC: Check if "rich" chip is active (from pre-GW data) ---
+    chip_is_active = False
+    if my_team_pre_gw_data and my_team_pre_gw_data.get('active_chip') == 'rich':
+        chip_is_active = True
+        st.info("ℹ️ 'Rich' chip active: Roster determined by last completed event.")
+    
+    # 3. Determine Final Roster Source EID
+    
+    current_roster_eid = pre_gw_start_eid
+    
+    if fixtures_data is not None and not fixtures_data.empty:
+        fixtures = fixtures_data
+        gw_fixtures = fixtures[fixtures['event'].isin(gw_events_selected)].copy()
+        event_dates = {}
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
         
+        for eid in gw_events_selected:
+            f = gw_fixtures[fixtures['event'] == eid]
+            if not f.empty: event_dates[eid] = f.iloc[0]['kickoff_time'][:10]
+            else: event_dates[eid] = "9999"
+        
+        if use_sim_mode:
+            split_idx = sim_game_day - 1
+            past_eids = gw_events_selected[:split_idx]
+            if past_eids: current_roster_eid = past_eids[-1]
+        else:
+            past_eids = [eid for eid in gw_events_selected if event_dates.get(eid, "9999") < today_str]
+            if past_eids: current_roster_eid = past_eids[-1]
+            
+    if chip_is_active:
+        # If rich chip is active, use the last completed event ID (current roster).
+        roster_source_eid = current_roster_eid 
+    else:
+        # If no rich chip is active, use the pre-GW roster (permanent squad).
+        roster_source_eid = pre_gw_start_eid
+            
+    
+    # Final fetch of the determined roster source
     my_team_data = None
     if roster_source_eid:
         my_team_data = fetch_picks(team_id_input, event_id=roster_source_eid)
         
-    # Check if team data was successfully fetched and has picks
+    # Final roster state initialization
+    current_roster_names = {}
+    current_roster_ids_set = set()
+    
     if not my_team_data or 'picks' not in my_team_data or len(my_team_data['picks']) != ROSTER_SIZE:
-         # Initialize players list as empty to allow the sidebar to load without crashing the whole app
          my_player_ids = []
          current_roster_liquidation_value = 0
          my_bank = 0
@@ -555,7 +575,7 @@ with st.sidebar:
              my_player_ids.append(pid) # Build the player ID list used later
              p_row = active_players.loc[active_players['id'] == pid]
              
-             if p_row.empty: continue # Skip if player not found in active list
+             if p_row.empty: continue
              
              now_cost = p_row['now_cost'].values[0]
              purchase_price = p.get('purchase_price', now_cost)
