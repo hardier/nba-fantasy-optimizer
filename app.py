@@ -164,7 +164,7 @@ def get_all_logs():
         conn.close()
         return df
 
-# --- HELPER FUNCTIONS ---
+# --- CORE FETCHING FUNCTIONS ---
 
 def fetch_json(url):
     try:
@@ -278,7 +278,7 @@ if st.query_params.get("admin") == "true":
     
     try:
         if "admin_password" not in st.secrets:
-            st.error("⚠️ Admin password not configured in Secrets. Access Denied.")
+            st.error("⚠️ Admin password not configured in Secrets. AccessDenied.")
             st.stop()
     except Exception:
         st.error("⚠️ Secrets file not found. Create `.streamlit/secrets.toml` to set up admin access.")
@@ -315,13 +315,22 @@ st.title("🏀 NBA Fantasy Optimizer (Live)")
 st.markdown("Optimize lineup and transfers accounting for **Mid-Week Progress** across multiple weeks.")
 
 # 1. PRE-FETCH STATIC DATA
-bootstrap = fetch_bootstrap()
-if not bootstrap:
-    st.error("Failed to fetch NBA Fantasy data. Please try again later.")
-    st.stop()
-    
-# FIX: Fetch fixtures data here so it's globally available
-fixtures_data = fetch_fixtures()
+# FIX: Move fetching inside the flow to avoid circular import issues upon module load
+# We use st.session_state to hold the fetched data across runs.
+
+if 'bootstrap_data' not in st.session_state:
+    st.session_state.bootstrap_data = fetch_bootstrap()
+    if not st.session_state.bootstrap_data:
+         st.error("Failed to fetch NBA Fantasy data. Please try again later.")
+         st.stop()
+         
+if 'fixtures_data_df' not in st.session_state:
+    st.session_state.fixtures_data_df = fetch_fixtures()
+    if st.session_state.fixtures_data_df:
+         st.session_state.fixtures_data_df = pd.DataFrame(st.session_state.fixtures_data_df)
+
+bootstrap = st.session_state.bootstrap_data
+fixtures_data = st.session_state.fixtures_data_df
 
 
 elements = pd.DataFrame(bootstrap['elements'])
@@ -418,6 +427,36 @@ with st.sidebar:
         st.session_state.default_sim_set = True
 
     team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
+    
+    # --- TEAM ID 17 VALIDATION LOGIC ---
+    validation_ok = True
+    if team_id_input == 17:
+        if 'is_validated_17' not in st.session_state:
+            st.session_state.is_validated_17 = False
+            
+        if st.session_state.is_validated_17 is False:
+            with st.container(border=True):
+                st.warning("🔒 Verification Required for Team ID 17.")
+                # CHANGED: Hint and phrase to "AI is the best!"
+                st.markdown("Please enter the verification phrase (Hint: AI is the best!).")
+                
+                validation_input = st.text_input("Enter Phrase:", key="validation_phrase")
+                
+                if st.button("Verify Identity", key="verify_btn", width='stretch'):
+                    if validation_input.strip() == "AI is the best!":
+                        st.session_state.is_validated_17 = True
+                        st.success("Verification successful! You can now run the optimization.")
+                        st.rerun() # FIX: Changed st.experimental_rerun() to st.rerun()
+                    else:
+                        st.error("Verification failed. Please check the phrase.")
+            
+            validation_ok = st.session_state.get('is_validated_17', False)
+        else:
+            st.success("✅ Team ID 17 Verified.")
+            validation_ok = True
+    
+    # --- END VALIDATION LOGIC ---
+    
     gameweek_input = st.number_input("Start Gameweek", value=st.session_state.initial_gw, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
@@ -466,8 +505,8 @@ with st.sidebar:
         roster_source_eid = gw_events_selected[0] - 1
         
         # Determine current roster based on selected sim day or auto detection
-        if fixtures_data:
-            fixtures = pd.DataFrame(fixtures_data)
+        if fixtures_data is not None and not fixtures_data.empty:
+            fixtures = fixtures_data
             gw_fixtures = fixtures[fixtures['event'].isin(gw_events_selected)].copy()
             event_dates = {}
             today_str = datetime.utcnow().strftime("%Y-%m-%d")
@@ -568,7 +607,7 @@ with st.sidebar:
     forced_exclude_ids = [all_available_for_add[n] for n in forced_exclude_names]
 
     st.markdown("---")
-    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch')
+    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch', disabled=(not validation_ok and team_id_input == 17))
 
 if run_btn:
     start_time = time.time()
@@ -615,8 +654,7 @@ if run_btn:
         
         if not all_target_event_ids: raise Exception("No valid events found")
 
-        fixtures_data = fetch_fixtures()
-        fixtures = pd.DataFrame(fixtures_data)
+        fixtures = fixtures_data # Use cached/global fixture data
         gw_fixtures = fixtures[fixtures['event'].isin(all_target_event_ids)].copy()
         
         event_dates = {}
