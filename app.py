@@ -461,8 +461,17 @@ with st.sidebar:
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
     
-    # Quick Sim Option
-    play_wildcard = st.checkbox("Play Wildcard (Unlimited Transfers)?", value=False, help="Activate this if you plan to play your Wildcard chip. This gives unlimited transfers for the FIRST day of the simulation, but normal limits apply for the rest of the week.")
+    # --- CHIP CHECKBOXES ---
+    # Wildcard is defined as unlimited transfers on one game day in that game week.
+    play_wildcard = st.checkbox("Play Wildcard (Unlimited Transfers)?", value=False, help="Allows unlimited transfers for ONE game day in this game week.")
+    
+    if play_wildcard:
+        force_wc_on_day_1 = st.checkbox("Force Wildcard on First Simulated Day?", value=True, help="If checked, the unlimited transfers will happen on the first day of the simulation. If unchecked, it will happen on the day corresponding to the current Gameweek day.")
+    else:
+        force_wc_on_day_1 = False
+    
+    # Removed the second checkbox and defined play_all_star_card as False for logic consistency
+    play_all_star_card = False 
     
     quick_sim = False # Default to False since checkbox is removed
     
@@ -506,20 +515,7 @@ with st.sidebar:
     # 1. Determine the event ID immediately preceding the target Gameweek start
     pre_gw_start_eid = gw_events_selected[0] - 1
     
-    # Initialize roster source to the pre-GW roster
-    roster_source_eid = pre_gw_start_eid
-    
-    # 2. Fetch the roster data for the immediate pre-Gameweek event
-    my_team_pre_gw_data = fetch_picks(team_id_input, event_id=pre_gw_start_eid)
-    
-    # --- CHIP LOGIC: Check if "rich" chip is active (from pre-GW data) ---
-    chip_is_active = False
-    if my_team_pre_gw_data and my_team_pre_gw_data.get('active_chip') == 'rich':
-        chip_is_active = True
-        st.info("ℹ️ 'Rich' chip active: Roster determined by last completed event.")
-    
-    # 3. Determine Final Roster Source EID
-    
+    # 2. Determine the event ID corresponding to the last completed day (simulated or real-time)
     current_roster_eid = pre_gw_start_eid
     
     if fixtures_data is not None and not fixtures_data.empty:
@@ -541,12 +537,17 @@ with st.sidebar:
             past_eids = [eid for eid in gw_events_selected if event_dates.get(eid, "9999") < today_str]
             if past_eids: current_roster_eid = past_eids[-1]
             
-    if chip_is_active:
-        # If rich chip is active, use the last completed event ID (current roster).
-        roster_source_eid = current_roster_eid 
+    
+    # 3. Determine Final Roster Source EID based on chips
+    if play_wildcard:
+        # If Wildcard (unlimited transfers) is played, the base roster
+        # must be the pre-Gameweek roster to allow a full reset.
+        roster_source_eid = pre_gw_start_eid 
+        
     else:
-        # If no rich chip is active, use the pre-GW roster (permanent squad).
-        roster_source_eid = pre_gw_start_eid
+        # Default: Use the last completed day's roster (simulated or real-time).
+        roster_source_eid = current_roster_eid
+
             
     
     # Final fetch of the determined roster source
@@ -636,6 +637,7 @@ if run_btn:
     # Gather options for logging
     user_opts = {
         "wildcard": play_wildcard,
+        "play_all_star_card": play_all_star_card, # Added explicit All Star Card flag
         "quick_sim": quick_sim,
         "simulation_mode": use_sim_mode,
         "sim_game_day": sim_game_day if use_sim_mode else "Auto",
@@ -747,12 +749,21 @@ if run_btn:
         # We use the pre-calculated my_player_ids, my_selling_prices, my_bank, and total_budget_safe
         
         total_budget_safe = current_roster_liquidation_value + my_bank - safety_margin
+        
+        # --- BUDGET OVERRIDE FOR ALL STAR CARD ---
+        # All Star Card gives unlimited budget, essentially removing the budget constraint.
+        if play_all_star_card:
+             total_budget_safe = 9999999 # Set to a very high number (effectively infinite)
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Banked Points (GW1)", f"{banked_points_total:.1f}")
         
         t_val = transfers_limit_map[weeks_schedule[0]['gw']]
         t_display = f"∞ (Day {sim_game_day}) / {t_val} (Rest)" if play_wildcard else t_val
+        if play_all_star_card:
+            # All Star Card gives unlimited transfers for Day 1 only (similar to wildcard, but constrained to one day in optimization logic)
+            t_display = f"∞ (Day 1) / {t_val} (Rest)"
+            
         c2.metric("Transfers Left (GW1)", t_display)
         
         c3.metric("Budget", f"{total_budget_safe/10}m")
@@ -927,16 +938,38 @@ if run_btn:
                 
                 if gw_indices:
                     week_transfers_vars = []
+                    
+                    # Wildcard is handled by unlimited transfers on Day 1 for the whole week's budget.
                     is_wildcard_week = (w_idx == 0 and play_wildcard)
+                    
+                    # All Star Card gives unlimited transfers for Day 1 only, and then reverts.
+                    is_all_star_day_1 = (w_idx == 0 and play_all_star_card)
                     
                     gw_indices.sort()
                     
                     for d_idx in gw_indices:
-                        # Transfers on the WC day do NOT count towards the weekly limit
-                        wc_day_solver_idx = gw_indices[0] + (sim_game_day - 1)
+                        # Determine if this day is the specific "Wildcard" day
+                        # Default logic: The wildcard day is the first future day (index 0 of this week's indices)
+                        # unless "Force on Day 1" is unchecked, then use the offset.
                         
-                        if is_wildcard_week and d_idx == wc_day_solver_idx: 
-                            continue
+                        wc_day_idx = -1
+                        if is_wildcard_week:
+                            if force_wc_on_day_1:
+                                wc_day_idx = gw_indices[0]
+                            else:
+                                wc_day_idx = gw_indices[0] + (sim_game_day - 1)
+                        
+                        # Transfers on the WC/All Star day do NOT count towards the standard weekly limit
+                        
+                        is_exempt_day = False
+                        if is_wildcard_week and d_idx == wc_day_idx:
+                            is_exempt_day = True
+                        elif is_all_star_day_1 and d_idx == (gw_indices[0] + (sim_game_day - 1)):
+                             # Keeping ASC logic aligned with WC day choice if needed, though mostly deprecated
+                             is_exempt_day = True
+
+                        if is_exempt_day:
+                            continue # Don't count transfers against the limit
                             
                         day_trans_vars = [trans_in_vars[(p['id'], d_idx)] for p in players_data]
                         week_transfers_vars.extend(day_trans_vars)
