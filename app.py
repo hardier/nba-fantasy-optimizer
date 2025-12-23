@@ -529,10 +529,25 @@ with st.sidebar:
             if not f.empty: event_dates[eid] = f.iloc[0]['kickoff_time'][:10]
             else: event_dates[eid] = "9999"
         
+        # Determine current roster based on simulated day or real-time
         if use_sim_mode:
             split_idx = sim_game_day - 1
             past_eids = gw_events_selected[:split_idx]
-            if past_eids: current_roster_eid = past_eids[-1]
+            
+            # The "ideal" source for the simulation is the day before sim start
+            sim_prev_eid = past_eids[-1] if past_eids else pre_gw_start_eid
+            
+            # Calculate Real-Time Last Completed EID to check for future days
+            past_eids_real = [eid for eid in gw_events_selected if event_dates.get(eid, "9999") < today_str]
+            real_time_last_completed_eid = past_eids_real[-1] if past_eids_real else pre_gw_start_eid
+            
+            # FIX: If the simulation wants to start in the future (sim_prev_eid > real_time), 
+            # we must fallback to the real current roster because the future roster doesn't exist yet.
+            if sim_prev_eid > real_time_last_completed_eid:
+                 current_roster_eid = real_time_last_completed_eid
+            else:
+                 current_roster_eid = sim_prev_eid
+                 
         else:
             past_eids = [eid for eid in gw_events_selected if event_dates.get(eid, "9999") < today_str]
             if past_eids: current_roster_eid = past_eids[-1]
