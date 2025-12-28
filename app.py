@@ -9,6 +9,7 @@ import sqlite3
 import json
 import socket
 import re # Added for regex extraction
+import random # Added for random monkey selection
 
 # --- OPTIONAL: FIREBASE ADMIN FOR CLOUD LOGGING ---
 try:
@@ -428,34 +429,17 @@ with st.sidebar:
 
     team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
     
-    # --- TEAM ID 17 VALIDATION LOGIC ---
-    validation_ok = True
+    # --- TEAM ID 17 EASTER EGG ---
     if team_id_input == 17:
-        if 'is_validated_17' not in st.session_state:
-            st.session_state.is_validated_17 = False
-            
-        if st.session_state.is_validated_17 is False:
-            with st.container(border=True):
-                st.warning("🔒 Verification Required for Team ID 17.")
-                # CHANGED: Hint and phrase to "AI is the best!"
-                st.markdown("Please enter the verification phrase (Hint: AI is the best!).")
-                
-                validation_input = st.text_input("Enter Phrase:", key="validation_phrase")
-                
-                if st.button("Verify Identity", key="verify_btn", width='stretch'):
-                    if validation_input.strip() == "AI is the best!":
-                        st.session_state.is_validated_17 = True
-                        st.success("Verification successful! You can now run the optimization.")
-                        st.rerun() 
-                    else:
-                        st.error("Verification failed. Please check the phrase.")
-            
-            validation_ok = st.session_state.get('is_validated_17', False)
-        else:
-            st.success("✅ Team ID 17 Verified.")
-            validation_ok = True
-    
-    # --- END VALIDATION LOGIC ---
+        st.sidebar.success("🐵 VIP Mode: Team 17 Detected!")
+        monkey_urls = [
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/56.png", # Mankey
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/57.png", # Primeape
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/390.png", # Chimchar
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/190.png", # Aipom
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/511.png", # Pansage
+        ]
+        st.sidebar.image(random.choice(monkey_urls), caption="Random Cartoon Monkey", width=200)
     
     gameweek_input = st.number_input("Start Gameweek", value=st.session_state.initial_gw, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
@@ -525,29 +509,14 @@ with st.sidebar:
         today_str = datetime.utcnow().strftime("%Y-%m-%d")
         
         for eid in gw_events_selected:
-            f = gw_fixtures[gw_fixtures['event'] == eid]
+            f = gw_fixtures[fixtures['event'] == eid]
             if not f.empty: event_dates[eid] = f.iloc[0]['kickoff_time'][:10]
             else: event_dates[eid] = "9999"
         
-        # Determine current roster based on simulated day or real-time
         if use_sim_mode:
             split_idx = sim_game_day - 1
             past_eids = gw_events_selected[:split_idx]
-            
-            # The "ideal" source for the simulation is the day before sim start
-            sim_prev_eid = past_eids[-1] if past_eids else pre_gw_start_eid
-            
-            # Calculate Real-Time Last Completed EID to check for future days
-            past_eids_real = [eid for eid in gw_events_selected if event_dates.get(eid, "9999") < today_str]
-            real_time_last_completed_eid = past_eids_real[-1] if past_eids_real else pre_gw_start_eid
-            
-            # FIX: If the simulation wants to start in the future (sim_prev_eid > real_time), 
-            # we must fallback to the real current roster because the future roster doesn't exist yet.
-            if sim_prev_eid > real_time_last_completed_eid:
-                 current_roster_eid = real_time_last_completed_eid
-            else:
-                 current_roster_eid = sim_prev_eid
-                 
+            if past_eids: current_roster_eid = past_eids[-1]
         else:
             past_eids = [eid for eid in gw_events_selected if event_dates.get(eid, "9999") < today_str]
             if past_eids: current_roster_eid = past_eids[-1]
@@ -644,7 +613,7 @@ with st.sidebar:
     forced_exclude_ids = [all_available_for_add[n] for n in forced_exclude_names]
 
     st.markdown("---")
-    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch', disabled=(not validation_ok and team_id_input == 17))
+    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch')
 
 if run_btn:
     start_time = time.time()
@@ -940,10 +909,8 @@ if run_btn:
                     if (pid, d_idx) in starter_vars:
                         prob += starter_vars[(pid, d_idx)] <= roster_vars[(pid, d_idx)]
                         prob += captain_vars[(pid, d_idx)] <= starter_vars[(pid, d_idx)]
-                        
-                        game_prob = player_schedule[pid].get(d_idx, 0)
-                        total_obj += starter_vars[(pid, d_idx)] * p['ep'] * game_prob
-                        total_obj += captain_vars[(pid, d_idx)] * p['ep'] * game_prob
+                        total_obj += starter_vars[(pid, d_idx)] * p['ep']
+                        total_obj += captain_vars[(pid, d_idx)] * p['ep']
 
             # Aggregated Constraints (Weekly)
             for w_idx, w_data in enumerate(weeks_schedule):
@@ -1011,7 +978,7 @@ if run_btn:
             prob.solve(pulp.PULP_CBC_CMD(msg=0))
             
             if pulp.LpStatus[prob.status] != 'Optimal':
-                # Reverted: Use simplified error message on solver failure
+                # Reverted: Use simplified error error_msg on solver failure
                 status_message = pulp.LpStatus[prob.status]
                 with option_tabs[opt_idx]: st.warning(f"Optimization failed: Solver returned status code {status_message}. Check constraints (Budget/Roster Size/Transfers).")
                 
@@ -1052,10 +1019,6 @@ if run_btn:
                 
                 previous_roster_ids = set(my_player_ids)
                 
-                # Get the permanent pre-GW roster IDs for All Star Reversion check
-                pre_gw_data = fetch_picks(team_id_input, pre_gw_start_eid)
-                pre_gw_permanent_ids = set(p['element'] for p in pre_gw_data['picks'])
-                
                 for w_data in weeks_schedule:
                     gw_num = w_data['gw']
                     gw_events = w_data['events']
@@ -1066,38 +1029,6 @@ if run_btn:
                         
                         for i, eid in enumerate(gw_events):
                             with day_tabs[i]:
-                                is_first_simulated_day = (eid == future_event_ids[0])
-                                is_all_star_reversion_day = (play_all_star_card and eid > future_event_ids[0])
-                                
-                                # Determine Roster to Display
-                                roster_ids = set()
-                                roster_to_display = []
-                                roster_today = [] # Initialize roster_today
-                                
-                                # 1. Get solved roster for the day
-                                if eid in event_id_to_solver_idx:
-                                    d_idx = event_id_to_solver_idx[eid]
-                                    for p in players_data:
-                                        if roster_vars[(p['id'], d_idx)].varValue > 0.5:
-                                            roster_ids.add(p['id'])
-                                            roster_today.append(p)
-                                elif eid in past_day_stats:
-                                    roster_ids = set(p['element'] for p in past_day_stats[eid]['picks'])
-                                    roster_to_display = [p for p in players_data if p['id'] in roster_ids]
-                                    roster_today = roster_to_display 
-                                    
-                                if is_all_star_reversion_day:
-                                    # If reversion day, use the permanent roster IDs
-                                    roster_ids = pre_gw_permanent_ids
-                                    roster_to_display = [p for p in players_data if p['id'] in roster_ids]
-                                elif roster_today:
-                                    roster_to_display = roster_today
-                                
-                                # Calculate transfers based on previous_roster_ids
-                                trans_in = roster_ids - previous_roster_ids
-                                trans_out = previous_roster_ids - roster_ids
-                                
-                                
                                 if eid in past_event_ids:
                                     date_label = event_dates.get(eid, '?')
                                     st.caption(f"Status: COMPLETED | Date: {date_label}")
@@ -1120,37 +1051,23 @@ if run_btn:
                                 
                                 elif eid in future_event_ids:
                                     d_idx = event_id_to_solver_idx[eid]
+                                    roster_today = []
+                                    roster_ids = set()
+                                    for p in players_data:
+                                        if roster_vars[(p['id'], d_idx)].varValue > 0.5:
+                                            roster_today.append(p)
+                                            roster_ids.add(p['id'])
                                     
-                                    # Special handling for All Star Card transfer display
-                                    if is_all_star_reversion_day:
-                                        # Transfers OUT from solved Day 1 team, IN to permanent squad
-                                        # Calculate transfers relative to the *solved Day 1 roster* (which is currently stored in previous_roster_ids)
-                                        
-                                        if trans_in or trans_out:
-                                             st.markdown("**Transfers (Reversion):**")
-                                             st.info(f"Roster reverted to permanent squad after Day 1 All Star Card.")
-                                        
-                                             t_out = []
-                                             t_in = []
-                                             for pid in trans_out:
-                                                p_obj = next((x for x in players_data if x['id'] == pid), None)
-                                                if p_obj:
-                                                    st.error(f"OUT: {p_obj['name']}")
-                                                    t_out.append(p_obj['name'])
-                                             for pid in trans_in:
-                                                p_obj = next(x for x in players_data if x['id'] == pid)
-                                                st.success(f"IN: {p_obj['name']}")
-                                                t_in.append(p_obj['name'])
-                                        
-                                    elif trans_in or trans_out:
+                                    trans_in = roster_ids - previous_roster_ids
+                                    trans_out = previous_roster_ids - roster_ids
+                                    if trans_in:
                                         st.markdown("**Transfers:**")
                                         t_out = []
                                         t_in = []
                                         for pid in trans_out:
                                             p_obj = next((x for x in players_data if x['id'] == pid), None)
-                                            if p_obj:
-                                                st.error(f"OUT: {p_obj['name']}")
-                                                t_out.append(p_obj['name'])
+                                            st.error(f"OUT: {p_obj['name']}")
+                                            t_out.append(p_obj['name'])
                                         for pid in trans_in:
                                             p_obj = next(x for x in players_data if x['id'] == pid)
                                             st.success(f"IN: {p_obj['name']}")
@@ -1160,30 +1077,23 @@ if run_btn:
                                             day_label = f"GW{gw_num} D{i+1}"
                                             best_option_transfers.append(f"{day_label}: {', '.join(t_out)} -> {', '.join(t_in)}")
                                     
-                                    
-                                    previous_roster_ids = roster_ids # Update for next day's comparison
+                                    previous_roster_ids = roster_ids
                                     
                                     l_data = []
-                                    for p in roster_to_display:
+                                    for p in roster_today:
                                         pid = p['id']
                                         status = "Bench"
                                         points = 0.0
                                         
                                         game_prob = player_schedule[p['id']].get(d_idx, 0)
                                         
-                                        # Only determine role and points if it's the standard solution (Day 1 ASC or standard week)
-                                        if not is_all_star_reversion_day:
-                                            if (pid, d_idx) in starter_vars and starter_vars[(pid, d_idx)].varValue > 0.5:
-                                                status = "Starter"
-                                                points = (p['ep'] / 10.0) * game_prob
-                                                if (pid, d_idx) in captain_vars and captain_vars[(p['id'], d_idx)].varValue > 0.5:
-                                                    status = "CAPTAIN ⭐"
-                                                    points *= 2
-                                            elif game_prob == 0: status = "No Game"
-                                        else:
-                                            # If reversion day, show current permanent role/points
-                                            status = "Permanent Roster"
-                                            points = (p['ep'] / 10.0) * game_prob if game_prob > 0 else 0.0
+                                        if (pid, d_idx) in starter_vars and starter_vars[(pid, d_idx)].varValue > 0.5:
+                                            status = "Starter"
+                                            points = (p['ep'] / 10.0) * game_prob
+                                            if (pid, d_idx) in captain_vars and captain_vars[(p['id'], d_idx)].varValue > 0.5:
+                                                status = "CAPTAIN ⭐"
+                                                points *= 2
+                                        elif game_prob == 0: status = "No Game"
                                         
                                         note = ""
                                         if 0 < game_prob < 1:
@@ -1196,7 +1106,7 @@ if run_btn:
                                         })
                                     
                                     df = pd.DataFrame(l_data)
-                                    role_order = {"CAPTAIN ⭐": 0, "Starter": 1, "Permanent Roster": 2, "Bench": 3, "No Game": 4}
+                                    role_order = {"CAPTAIN ⭐": 0, "Starter": 1, "Bench": 2, "No Game": 3}
                                     df['sort'] = df['Role'].map(role_order)
                                     st.dataframe(df.sort_values('sort').drop('sort', axis=1), width='stretch', hide_index=True)
 
