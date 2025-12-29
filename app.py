@@ -435,9 +435,36 @@ with st.sidebar:
         monkey_urls = [
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/56.png", # Mankey
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/57.png", # Primeape
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/390.png", # Chimchar
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/190.png", # Aipom
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/287.png", # Slakoth
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/288.png", # Vigoroth
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/289.png", # Slaking
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/390.png", # Chimchar
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/391.png", # Monferno
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/392.png", # Infernape
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/424.png", # Ambipom
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/511.png", # Pansage
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/512.png", # Simisage
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/513.png", # Pansear
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/514.png", # Simisear
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/515.png", # Panpour
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/516.png", # Simipour
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/554.png", # Darumaka
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/555.png", # Darmanitan
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/765.png", # Oranguru
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/766.png", # Passimian
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/810.png", # Grookey
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/811.png", # Thwackey
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/812.png", # Rillaboom
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/893.png", # Zarude
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/945.png", # Grafaiai
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/979.png", # Annihilape
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/1014.png", # Munkidori
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/10191.png", # Zarude (Dada)
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Monkey_Face_Emoji.svg/512px-Monkey_Face_Emoji.svg.png", # Emoji Face
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/3/31/Hear_no_evil_monkey_emoji.svg/512px-Hear_no_evil_monkey_emoji.svg.png", # Hear-No-Evil
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/See_no_evil_monkey_emoji.svg/512px-See_no_evil_monkey_emoji.svg.png", # See-No-Evil
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/7/75/Speak_no_evil_monkey_emoji.svg/512px-Speak_no_evil_monkey_emoji.svg.png" # Speak-No-Evil
         ]
         st.sidebar.image(random.choice(monkey_urls), caption="Random Cartoon Monkey", width=200)
     
@@ -613,7 +640,7 @@ with st.sidebar:
     forced_exclude_ids = [all_available_for_add[n] for n in forced_exclude_names]
 
     st.markdown("---")
-    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch', disabled=(not validation_ok and team_id_input == 17))
+    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch')
 
 if run_btn:
     start_time = time.time()
