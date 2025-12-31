@@ -486,6 +486,16 @@ with st.sidebar:
     
     quick_sim = False # Default to False since checkbox is removed
     
+    # --- EXTRA TRANSFERS INPUT ---
+    extra_transfers = st.number_input(
+        "Extra Transfers (Cost: 100 pts/each)", 
+        min_value=0, 
+        max_value=10, 
+        value=0, 
+        step=1,
+        help="Add extra transfers to the first week limit. 100 points will be deducted from the total score for each."
+    )
+    
     st.markdown("---")
     st.caption("Simulation Mode")
     
@@ -649,6 +659,7 @@ if run_btn:
     user_opts = {
         "wildcard": play_wildcard,
         "play_all_star_card": play_all_star_card, # Added explicit All Star Card flag
+        "extra_transfers": extra_transfers, # Log extra transfers
         "quick_sim": quick_sim,
         "simulation_mode": use_sim_mode,
         "sim_game_day": sim_game_day if use_sim_mode else "Auto",
@@ -986,7 +997,16 @@ if run_btn:
                     # Limit applies to the sum of non-WC day transfers (which is the standard limit)
                     limit = transfers_limit_map[gw_num]
                     
-                    prob += pulp.lpSum(week_transfers_vars) <= limit, f"TransLimit_GW{gw_num}"
+                    # Add purchased extra transfers to the first week's limit
+                    if w_idx == 0:
+                        limit += extra_transfers
+                        # If extra transfers are enabled, force the solver to use the entire capacity (Base + Extra)
+                        if extra_transfers > 0:
+                            prob += pulp.lpSum(week_transfers_vars) == limit, f"TransLimit_GW{gw_num}"
+                        else:
+                            prob += pulp.lpSum(week_transfers_vars) <= limit, f"TransLimit_GW{gw_num}"
+                    else:
+                        prob += pulp.lpSum(week_transfers_vars) <= limit, f"TransLimit_GW{gw_num}"
                     
                     week_captains = []
                     for d_idx in gw_indices:
@@ -1020,7 +1040,8 @@ if run_btn:
             previous_solutions_constraints.append(current_sol_roster)
             
             future_proj = pulp.value(prob.objective) / 10
-            total_proj = banked_points_total + future_proj
+            transfer_cost = extra_transfers * 100
+            total_proj = banked_points_total + future_proj - transfer_cost
             if opt_idx == 0: best_total_score = total_proj
             
             gw_breakdown = {}
@@ -1040,7 +1061,7 @@ if run_btn:
 
             with option_tabs[opt_idx]:
                 cols = st.columns(len(gw_breakdown) + 1)
-                cols[0].metric("Total Score (EV)", f"{total_proj:.1f}")
+                cols[0].metric("Total Score (EV)", f"{total_proj:.1f}", delta=f"-{transfer_cost} (Cost)" if transfer_cost > 0 else None)
                 for i, (gw, score) in enumerate(gw_breakdown.items()):
                     cols[i+1].metric(f"GW{gw} EV", f"{score:.1f}")
                 
@@ -1118,7 +1139,6 @@ if run_btn:
                                     # Special handling for All Star Card transfer display
                                     if is_all_star_reversion_day:
                                         # Transfers OUT from solved Day 1 team, IN to permanent squad
-                                        # Calculate transfers relative to the *solved Day 1 roster* (which is currently stored in previous_roster_ids)
                                         
                                         if trans_in or trans_out:
                                              st.markdown("**Transfers (Reversion):**")
