@@ -302,7 +302,7 @@ if st.query_params.get("admin") == "true":
                 day_logs = logs_df[logs_df['date_group'] == d]
                 count = len(day_logs)
                 with st.expander(f"📅 {d} ({count} logs)", expanded=(d == unique_dates[0])):
-                    st.dataframe(logs_df[['timestamp', 'ip_address', 'location', 'team_id', 'gameweek', 'weeks_planned', 'user_options', 'status', 'duration_sec', 'error_msg', 'result_summary', 'transfers']], width='stretch', hide_index=True)
+                    st.dataframe(day_logs[['timestamp', 'ip_address', 'location', 'team_id', 'gameweek', 'weeks_planned', 'user_options', 'status', 'duration_sec', 'error_msg', 'result_summary', 'transfers']], width='stretch', hide_index=True)
             st.markdown("---")
             csv = logs_df.to_csv(index=False)
             st.download_button("Download All Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
@@ -435,38 +435,45 @@ with st.sidebar:
         monkey_urls = [
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/56.png", # Mankey
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/57.png", # Primeape
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/190.png", # Aipom
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/287.png", # Slakoth
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/288.png", # Vigoroth
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/289.png", # Slaking
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/390.png", # Chimchar
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/190.png", # Aipom
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/511.png", # Pansage
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/513.png", # Pansear
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/515.png", # Panpour
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/391.png", # Monferno
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/392.png", # Infernape
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/424.png", # Ambipom
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/511.png", # Pansage
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/512.png", # Simisage
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/513.png", # Pansear
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/514.png", # Simisear
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/515.png", # Panpour
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/516.png", # Simipour
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/554.png", # Darumaka
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/555.png", # Darmanitan
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/765.png", # Oranguru
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/766.png", # Passimian
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/810.png", # Grookey
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/811.png", # Thwackey
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/812.png", # Rillaboom
             "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/893.png", # Zarude
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/945.png", # Grafaiai
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/979.png", # Annihilape
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/1014.png", # Munkidori
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/10191.png", # Zarude (Dada)
-            "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Monkey_Face_Emoji.svg/512px-Monkey_Face_Emoji.svg.png", # Emoji Face
-            "https://upload.wikimedia.org/wikipedia/commons/thumb/3/31/Hear_no_evil_monkey_emoji.svg/512px-Hear_no_evil_monkey_emoji.svg.png", # Hear-No-Evil
-            "https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/See_no_evil_monkey_emoji.svg/512px-See_no_evil_monkey_emoji.svg.png", # See-No-Evil
-            "https://upload.wikimedia.org/wikipedia/commons/thumb/7/75/Speak_no_evil_monkey_emoji.svg/512px-Speak_no_evil_monkey_emoji.svg.png" # Speak-No-Evil
         ]
         st.sidebar.image(random.choice(monkey_urls), caption="Random Cartoon Monkey", width=200)
+
+    # --- TEAM ID 9 VALIDATION ---
+    validation_9_ok = True
+    if team_id_input == 9:
+        if 'id9_verified' not in st.session_state:
+            st.session_state.id9_verified = False
+        
+        if not st.session_state.id9_verified:
+            with st.container(border=True):
+                st.warning("🔒 Verification Required for Team 9")
+                st.markdown("Please type the first 20 digits of Pi (starting `3.14159...`).")
+                pi_input = st.text_input("Pi Digits:", key="pi_val_9")
+                
+                if st.button("Verify Pi", key="verify_pi_btn", width='stretch'):
+                    target_pi = "3.14159265358979323846"
+                    if pi_input.strip() == target_pi:
+                        st.session_state.id9_verified = True
+                        st.success("Correct!")
+                        st.rerun()
+                    else:
+                        st.error(f"Incorrect. Verification failed.")
+            validation_9_ok = False
+        else:
+             st.success("✅ Team 9 Verified")
+             validation_9_ok = True
+
     
     gameweek_input = st.number_input("Start Gameweek", value=st.session_state.initial_gw, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
@@ -650,7 +657,7 @@ with st.sidebar:
     forced_exclude_ids = [all_available_for_add[n] for n in forced_exclude_names]
 
     st.markdown("---")
-    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch')
+    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch', disabled=(not validation_9_ok))
 
 if run_btn:
     start_time = time.time()
