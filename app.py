@@ -428,52 +428,9 @@ with st.sidebar:
         st.session_state.default_sim_set = True
 
     team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
-    
-    # --- TEAM ID 17 EASTER EGG ---
-    if team_id_input == 17:
-        st.sidebar.success("🐵 VIP Mode: Team 17 Detected!")
-        monkey_urls = [
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/56.png", # Mankey
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/57.png", # Primeape
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/390.png", # Chimchar
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/190.png", # Aipom
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/511.png", # Pansage
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/513.png", # Pansear
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/515.png", # Panpour
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/391.png", # Monferno
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/392.png", # Infernape
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/424.png", # Ambipom
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/810.png", # Grookey
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/812.png", # Rillaboom
-            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/893.png", # Zarude
-        ]
-        st.sidebar.image(random.choice(monkey_urls), caption="Random Cartoon Monkey", width=200)
 
     # --- TEAM ID 9 VALIDATION ---
     validation_9_ok = True
-    if team_id_input == 9:
-        if 'id9_verified' not in st.session_state:
-            st.session_state.id9_verified = False
-        
-        if not st.session_state.id9_verified:
-            with st.container(border=True):
-                st.warning("🔒 Verification Required for Team 9")
-                st.markdown("Please type the first 20 digits of Pi (starting `3.14159...`).")
-                pi_input = st.text_input("Pi Digits:", key="pi_val_9")
-                
-                if st.button("Verify Pi", key="verify_pi_btn", width='stretch'):
-                    target_pi = "3.14159265358979323846"
-                    if pi_input.strip() == target_pi:
-                        st.session_state.id9_verified = True
-                        st.success("Correct!")
-                        st.rerun()
-                    else:
-                        st.error(f"Incorrect. Verification failed.")
-            validation_9_ok = False
-        else:
-             st.success("✅ Team 9 Verified")
-             validation_9_ok = True
-
     
     gameweek_input = st.number_input("Start Gameweek", value=st.session_state.initial_gw, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
