@@ -652,7 +652,7 @@ with st.sidebar:
     forced_exclude_ids = [all_available_for_add[n] for n in forced_exclude_names]
 
     st.markdown("---")
-    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch', disabled=(not validation_9_ok))
+    run_btn = st.button("RUN OPTIMIZATION", type="primary", width='stretch')
 
 if run_btn:
     start_time = time.time()
