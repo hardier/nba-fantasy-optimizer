@@ -302,7 +302,7 @@ if st.query_params.get("admin") == "true":
                 day_logs = logs_df[logs_df['date_group'] == d]
                 count = len(day_logs)
                 with st.expander(f"📅 {d} ({count} logs)", expanded=(d == unique_dates[0])):
-                    st.dataframe(day_logs[['timestamp', 'ip_address', 'location', 'team_id', 'gameweek', 'weeks_planned', 'user_options', 'status', 'duration_sec', 'error_msg', 'result_summary', 'transfers']], width='stretch', hide_index=True)
+                    st.dataframe(logs_df[['timestamp', 'ip_address', 'location', 'team_id', 'gameweek', 'weeks_planned', 'user_options', 'status', 'duration_sec', 'error_msg', 'result_summary', 'transfers']], width='stretch', hide_index=True)
             st.markdown("---")
             csv = logs_df.to_csv(index=False)
             st.download_button("Download All Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
@@ -428,10 +428,47 @@ with st.sidebar:
         st.session_state.default_sim_set = True
 
     team_id_input = st.number_input("Team ID", value=DEFAULT_TEAM_ID, step=1)
+    
+    # --- TEAM ID 17 EASTER EGG ---
+    if team_id_input == 17:
+        st.sidebar.success("🐵 VIP Mode: Team 17 Detected!")
+        monkey_urls = [
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/56.png", # Mankey
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/57.png", # Primeape
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/190.png", # Aipom
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/287.png", # Slakoth
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/288.png", # Vigoroth
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/289.png", # Slaking
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/390.png", # Chimchar
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/391.png", # Monferno
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/392.png", # Infernape
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/424.png", # Ambipom
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/511.png", # Pansage
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/512.png", # Simisage
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/513.png", # Pansear
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/514.png", # Simisear
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/515.png", # Panpour
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/516.png", # Simipour
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/554.png", # Darumaka
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/555.png", # Darmanitan
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/765.png", # Oranguru
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/766.png", # Passimian
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/810.png", # Grookey
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/811.png", # Thwackey
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/812.png", # Rillaboom
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/893.png", # Zarude
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/945.png", # Grafaiai
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/979.png", # Annihilape
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/1014.png", # Munkidori
+            "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/10191.png", # Zarude (Dada)
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Monkey_Face_Emoji.svg/512px-Monkey_Face_Emoji.svg.png", # Emoji Face
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/3/31/Hear_no_evil_monkey_emoji.svg/512px-Hear_no_evil_monkey_emoji.svg.png", # Hear-No-Evil
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/See_no_evil_monkey_emoji.svg/512px-See_no_evil_monkey_emoji.svg.png", # See-No-Evil
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/7/75/Speak_no_evil_monkey_emoji.svg/512px-Speak_no_evil_monkey_emoji.svg.png" # Speak-No-Evil
+        ]
+        st.sidebar.image(random.choice(monkey_urls), caption="Random Cartoon Monkey", width=200)
 
     # --- TEAM ID 9 VALIDATION ---
-    validation_9_ok = True
-    
     gameweek_input = st.number_input("Start Gameweek", value=st.session_state.initial_gw, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
@@ -559,7 +596,8 @@ with st.sidebar:
          for p in picks:
              pid = p['element']
              my_player_ids.append(pid) # Build the player ID list used later
-             p_row = active_players.loc[active_players['id'] == pid]
+             # FIX: Look up player in full elements dataframe (including 'u' players) to prevent key errors
+             p_row = elements.loc[elements['id'] == pid]
              
              if p_row.empty: continue
              
@@ -734,7 +772,8 @@ if run_btn:
         # 5. Roster and Budget are already derived and validated in the sidebar logic.
         # We use the pre-calculated my_player_ids, my_selling_prices, my_bank, and total_budget_safe
         
-        total_budget_safe = current_roster_liquidation_value + my_bank - safety_margin
+        # Ensure budget never drops below current roster value to prevent Day 0 infeasibility if bank is 0
+        total_budget_safe = current_roster_liquidation_value + max(0, my_bank - safety_margin)
         
         # --- BUDGET OVERRIDE FOR ALL STAR CARD ---
         # All Star Card gives unlimited budget, essentially removing the budget constraint.
@@ -773,7 +812,14 @@ if run_btn:
         
         # Sort candidates by ID before fetching for consistent API calls/caching
         sorted_candidate_ids = sorted(list(candidate_ids))
-        players_to_fetch = active_players[active_players['id'].isin(sorted_candidate_ids)]
+        
+        # FIX: Ensure candidate lookups for 'u' status players work by using 'elements' DF + My Team filter
+        candidates_df = elements[elements['id'].isin(sorted_candidate_ids)]
+        # Keep if status != 'u' OR id is in my_player_ids (to catch injured owned players)
+        players_to_fetch = candidates_df[
+            (candidates_df['status'] != 'u') | (candidates_df['id'].isin(my_player_ids))
+        ]
+        
         player_eps = {}
         
         owned_injured_pids = [] 
