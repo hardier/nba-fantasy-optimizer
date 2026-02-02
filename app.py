@@ -302,7 +302,7 @@ if st.query_params.get("admin") == "true":
                 day_logs = logs_df[logs_df['date_group'] == d]
                 count = len(day_logs)
                 with st.expander(f"📅 {d} ({count} logs)", expanded=(d == unique_dates[0])):
-                    st.dataframe(logs_df[['timestamp', 'ip_address', 'location', 'team_id', 'gameweek', 'weeks_planned', 'user_options', 'status', 'duration_sec', 'error_msg', 'result_summary', 'transfers']], width='stretch', hide_index=True)
+                    st.dataframe(day_logs[['timestamp', 'ip_address', 'location', 'team_id', 'gameweek', 'weeks_planned', 'user_options', 'status', 'duration_sec', 'error_msg', 'result_summary', 'transfers']], width='stretch', hide_index=True)
             st.markdown("---")
             csv = logs_df.to_csv(index=False)
             st.download_button("Download All Logs CSV", csv, "nba_optimizer_logs.csv", "text/csv")
@@ -467,8 +467,7 @@ with st.sidebar:
             "https://upload.wikimedia.org/wikipedia/commons/thumb/7/75/Speak_no_evil_monkey_emoji.svg/512px-Speak_no_evil_monkey_emoji.svg.png" # Speak-No-Evil
         ]
         st.sidebar.image(random.choice(monkey_urls), caption="Random Cartoon Monkey", width=200)
-
-    # --- TEAM ID 9 VALIDATION ---
+    
     gameweek_input = st.number_input("Start Gameweek", value=st.session_state.initial_gw, step=1)
     weeks_to_optimize = st.selectbox("Weeks to Plan Ahead", [1, 2, 3], index=0)
     safety_margin = st.number_input("Budget Safety Margin (0.1m units)", value=1, min_value=0)
@@ -540,6 +539,7 @@ with st.sidebar:
     # 2. Determine the event ID corresponding to the last completed day (simulated or real-time)
     current_roster_eid = pre_gw_start_eid
     
+    # Check if fixtures_data is None before using it
     if fixtures_data is not None and not fixtures_data.empty:
         fixtures = fixtures_data
         gw_fixtures = fixtures[fixtures['event'].isin(gw_events_selected)].copy()
@@ -559,6 +559,8 @@ with st.sidebar:
             past_eids = [eid for eid in gw_events_selected if event_dates.get(eid, "9999") < today_str]
             if past_eids: current_roster_eid = past_eids[-1]
             
+    # If fixtures data is not available, we can't reliably determine past/future, so default to pre-GW start
+    # or handle the missing data gracefully (though pre-GW start is a safe default).
     
     # 3. Determine Final Roster Source EID based on chips
     if play_wildcard:
@@ -680,6 +682,15 @@ if run_btn:
         # Check if we were able to load a full roster in the sidebar; if not, raise a final error.
         if len(my_player_ids) != ROSTER_SIZE:
              raise Exception(f"Initialization Error: Optimization cannot run because the initial roster size is incorrect ({len(my_player_ids)}/{ROSTER_SIZE} loaded). Please check your Team ID and Gameweek selection.")
+
+        if fixtures_data is None or fixtures_data.empty:
+             # Retry fetching fixtures if they are missing
+             st.session_state.fixtures_data_df = fetch_fixtures()
+             if st.session_state.fixtures_data_df:
+                 st.session_state.fixtures_data_df = pd.DataFrame(st.session_state.fixtures_data_df)
+                 fixtures_data = st.session_state.fixtures_data_df
+             else:
+                 raise Exception("Failed to load fixture data. Please check the API connection.")
              
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -702,6 +713,7 @@ if run_btn:
         if not all_target_event_ids: raise Exception("No valid events found")
 
         fixtures = fixtures_data # Use cached/global fixture data
+        # Ensure fixtures_data is valid before filtering
         gw_fixtures = fixtures[fixtures['event'].isin(all_target_event_ids)].copy()
         
         event_dates = {}
